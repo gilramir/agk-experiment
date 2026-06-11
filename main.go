@@ -38,8 +38,8 @@ import (
 const backgroundFile = "TEST_AGENT.md"
 
 // options holds the parsed command-line arguments. Field names map to the
-// argparse switches/positional (e.g. --workers -> Workers, the "url" positional
-// -> URL via its Dest).
+// argparse switches/positional (e.g. --jobs -> Workers and the "url" positional
+// -> URL, both via their Dest).
 type options struct {
 	Workers int
 	Output  string
@@ -64,7 +64,8 @@ func run() error {
 			"or test-report URL; /api/json is appended automatically.",
 	})
 	ap.Add(&argparse.Argument{
-		Switches: []string{"-w", "--workers"},
+		Switches: []string{"-j", "--jobs"},
+		Dest:     "Workers",
 		MetaVar:  "N",
 		Help:     "Parallel workers (overrides config; 0 = use config)",
 	})

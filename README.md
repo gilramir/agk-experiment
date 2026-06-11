@@ -66,7 +66,7 @@ are injected into every diagnosis as background context.
 testdiag https://jenkins.example.com/job/myapp/1234/
 
 # Overrides:
-testdiag --workers 8 --output ./reports https://jenkins.example.com/job/myapp/1234/testReport/
+testdiag -j 8 --output ./reports https://jenkins.example.com/job/myapp/1234/testReport/
 ```
 
 ## Placeholders

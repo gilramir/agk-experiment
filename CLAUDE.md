@@ -24,7 +24,7 @@ go test ./internal/workspace/ -run TestResolve -v   # run a single test once the
 
 # Run it (needs config + a reachable LLM endpoint; see Setup in README.md):
 go run . https://jenkins.example.com/job/myapp/1234/
-go run . --workers 8 --output ./reports <url>
+go run . -j 8 --output ./reports <url>
 ```
 
 There is currently **no test suite**; `go test ./...` reports `[no test files]`.
