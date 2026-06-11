@@ -1,0 +1,38 @@
+Build a CLI tool that uses LLMS, in Go, using AgenticGoKit.
+A copy of AgenticGoKit is cloned into the AgenticGoKit/ directory.
+It is not part of this repo.
+
+We won't run this, but only create the program as best we can, and leave place
+holders where needed.
+
+The program will be used to diagnose automated test run failures for a software
+project.
+
+The command line tool will accept a URL as the argument. It is a URL to the
+Jenkins build that has test failures.
+
+The command-line tool will GET data by using the URL, and passing an
+authorization token (I'm not sure what kind of token or where we store it;
+provide few options).
+
+The code will parse the retrieved HTML to find links to individual test
+failures.
+
+For each link, it:
+1. Calculates the path to the test file (we will have code which translates the
+URL to the test file name)
+2. GETs the URL to get the output of the test failure.
+
+The program then calls an LLM to have it read the test log  and provides it
+with an MCP tool to read other files in the same workspace. The MCP tools
+needed are:
+* read an entire file
+* list a directory
+* get the "wc -l" of 1 or more files
+* read a range of lines (or one line) from a single file
+* grep patterns from a file
+
+The output of the LLM should be the root cause of the failure.
+
+This is saved to a markdown file.
+This is repeated for each failed test link.

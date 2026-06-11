@@ -1,0 +1,34 @@
+# testdiag configuration.
+#
+# Copy to ~/.config/testdiag/config.toml and edit. Every value can also be set
+# (or overridden) with an environment variable — handy for secrets in CI.
+
+[jenkins]
+# Jenkins uses HTTP Basic auth with your username + a personal API token
+# (Account > Configure > API Token), NOT your password.
+#   env: TESTDIAG_JENKINS_USER, TESTDIAG_JENKINS_TOKEN
+user      = "your-jenkins-username"
+api_token = "your-jenkins-api-token"
+
+[llm]
+# Any OpenAI-API-compatible endpoint, including a local server.
+#   env: TESTDIAG_LLM_PROVIDER, TESTDIAG_LLM_BASE_URL, TESTDIAG_LLM_MODEL,
+#        TESTDIAG_LLM_API_KEY, TESTDIAG_LLM_TEMPERATURE, TESTDIAG_LLM_MAX_TOKENS
+provider    = "openai"
+base_url    = "http://localhost:1234/v1"
+model       = "your-local-model"
+api_key     = ""              # often unused by local servers
+temperature = 0.0
+max_tokens  = 4096
+
+[workspace]
+# The local checkout the Jenkins build ran against. TEST_AGENT.md is read from
+# the root of this directory and added to the prompt as project context.
+# Defaults to the current working directory if empty.
+#   env: TESTDIAG_WORKSPACE_ROOT
+root = ""
+
+[output]
+#   env: TESTDIAG_OUTPUT_DIR, TESTDIAG_WORKERS
+dir     = "test-diagnosis"   # one Markdown report per failed test is written here
+workers = 4                  # failed tests are diagnosed in parallel
