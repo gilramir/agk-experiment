@@ -38,6 +38,16 @@ type LLM struct {
 	APIKey      string  `toml:"api_key"`     // may be empty for local servers
 	Temperature float32 `toml:"temperature"` // sampling temperature
 	MaxTokens   int     `toml:"max_tokens"`  // max tokens per completion
+
+	// NormalizeToolCalls runs requests through an in-process proxy that rewrites
+	// each model's native tool-call syntax (GPT-OSS/Gemma/Mistral/Nemotron) into
+	// the form AgenticGoKit parses. On by default; harmless if the model already
+	// uses a recognized format. Disable for a model that needs no translation.
+	NormalizeToolCalls bool `toml:"normalize_tool_calls"`
+	// InjectTools makes that proxy add a `tools` array to each request so
+	// tool-aware chat templates advertise the tools to the model. On by default;
+	// disable if a server rejects requests that carry tools.
+	InjectTools bool `toml:"inject_tools"`
 }
 
 // Workspace describes the local checkout the failing tests came from. The
@@ -98,9 +108,11 @@ func Load() (*Config, error) {
 func defaults() *Config {
 	return &Config{
 		LLM: LLM{
-			Provider:    "openai",
-			Temperature: 0.0,
-			MaxTokens:   4096,
+			Provider:           "openai",
+			Temperature:        0.0,
+			MaxTokens:          4096,
+			NormalizeToolCalls: true,
+			InjectTools:        true,
 		},
 		Output: Output{
 			Dir:     "test-diagnosis",
@@ -120,6 +132,8 @@ func applyEnvOverrides(cfg *Config) {
 	setStr(&cfg.LLM.APIKey, "TESTDIAG_LLM_API_KEY")
 	setFloat(&cfg.LLM.Temperature, "TESTDIAG_LLM_TEMPERATURE")
 	setInt(&cfg.LLM.MaxTokens, "TESTDIAG_LLM_MAX_TOKENS")
+	setBool(&cfg.LLM.NormalizeToolCalls, "TESTDIAG_LLM_NORMALIZE_TOOL_CALLS")
+	setBool(&cfg.LLM.InjectTools, "TESTDIAG_LLM_INJECT_TOOLS")
 
 	setStr(&cfg.Workspace.Root, "TESTDIAG_WORKSPACE_ROOT")
 
@@ -150,6 +164,14 @@ func setInt(dst *int, env string) {
 	if v, ok := os.LookupEnv(env); ok {
 		if n, err := strconv.Atoi(v); err == nil {
 			*dst = n
+		}
+	}
+}
+
+func setBool(dst *bool, env string) {
+	if v, ok := os.LookupEnv(env); ok {
+		if b, err := strconv.ParseBool(v); err == nil {
+			*dst = b
 		}
 	}
 }

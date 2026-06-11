@@ -67,6 +67,20 @@ worker pool → write a report each.
   valid, safe outcome.
 - **`internal/report`** — writes one Markdown root-cause report per test into the
   output dir.
+- **`internal/toolproto`** — normalizes the various native tool-call syntaxes
+  open models emit (GPT-OSS Harmony, Gemma ` ```tool_code `, Mistral
+  `[TOOL_CALLS]`, Nemotron `<TOOLCALL>`, Llama 3.x bare-JSON / `<|python_tag|>`,
+  plus structured `tool_calls`) into the one text shape AgenticGoKit's parser
+  recognizes:
+  `TOOL_CALL{"name":...,"args":{...}}`. Pure functions; well covered by tests.
+- **`internal/llmproxy`** — an in-process reverse proxy fronting the LLM
+  endpoint. Needed because AgenticGoKit v0.5.x's OpenAI adapter does **no**
+  native tool calling: it never sends a `tools` array and reads only
+  `choices[].message.content`, leaving the agent to parse tool calls out of
+  text. The proxy injects the workspace tools into each request and runs the
+  response `content` (and any structured `tool_calls`) through `toolproto`
+  before AgenticGoKit sees it. `main.go` starts it and repoints
+  `cfg.LLM.BaseURL` at it when `llm.normalize_tool_calls` is set (default on).
 
 ## Key conventions
 

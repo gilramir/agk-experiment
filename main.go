@@ -27,6 +27,7 @@ import (
 	"github.com/gilbertr/testdiag/internal/config"
 	"github.com/gilbertr/testdiag/internal/diagnose"
 	"github.com/gilbertr/testdiag/internal/jenkins"
+	"github.com/gilbertr/testdiag/internal/llmproxy"
 	"github.com/gilbertr/testdiag/internal/report"
 	"github.com/gilbertr/testdiag/internal/tools"
 	"github.com/gilbertr/testdiag/internal/workspace"
@@ -100,6 +101,30 @@ func run() error {
 
 	// Register the workspace file tools once, before any agent is built.
 	toolNames := tools.Register(ws)
+
+	// Front the LLM endpoint with the tool-call normalizing proxy so models with
+	// differing native tool-call syntaxes (GPT-OSS, Gemma, Mistral, Nemotron)
+	// all work. This rewrites cfg.LLM.BaseURL to the local proxy.
+	if cfg.LLM.NormalizeToolCalls {
+		var proxyTools []llmproxy.Tool
+		if cfg.LLM.InjectTools {
+			for _, s := range tools.Schemas() {
+				proxyTools = append(proxyTools, llmproxy.Tool{
+					Name:        s.Name,
+					Description: s.Description,
+					Parameters:  s.Parameters,
+				})
+			}
+		}
+		px, err := llmproxy.Start(cfg.LLM.BaseURL, proxyTools)
+		if err != nil {
+			return fmt.Errorf("starting tool-call proxy: %w", err)
+		}
+		defer px.Close()
+		fmt.Printf("Tool-call normalizer active: %s -> %s (inject_tools=%t)\n",
+			px.BaseURL(), cfg.LLM.BaseURL, cfg.LLM.InjectTools)
+		cfg.LLM.BaseURL = px.BaseURL()
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

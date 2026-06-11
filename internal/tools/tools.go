@@ -29,17 +29,24 @@ const (
 	maxDirEntries  = 1000    // max entries returned by list_directory
 )
 
-// Register registers all workspace tools against ws. Call once at startup,
-// before building any agent. The returned slice is the tool names registered
-// (useful for logging / prompt construction).
-func Register(ws *workspace.Workspace) []string {
-	defs := []vnext.Tool{
+// toolDefs is the canonical list of workspace tools. Both Register (which wires
+// them into the agent) and Schemas (which advertises them to the model) build
+// from this single source so the two never drift.
+func toolDefs(ws *workspace.Workspace) []vnext.Tool {
+	return []vnext.Tool{
 		&readFileTool{ws: ws},
 		&listDirTool{ws: ws},
 		&countLinesTool{ws: ws},
 		&readLinesTool{ws: ws},
 		&grepTool{ws: ws},
 	}
+}
+
+// Register registers all workspace tools against ws. Call once at startup,
+// before building any agent. The returned slice is the tool names registered
+// (useful for logging / prompt construction).
+func Register(ws *workspace.Workspace) []string {
+	defs := toolDefs(ws)
 	names := make([]string, 0, len(defs))
 	for _, d := range defs {
 		d := d // capture for the factory closure
@@ -47,6 +54,35 @@ func Register(ws *workspace.Workspace) []string {
 		names = append(names, d.Name())
 	}
 	return names
+}
+
+// Schema is a tool's name, description, and JSON-schema parameters — enough to
+// advertise the tool to an OpenAI-compatible server as a `tools` entry.
+type Schema struct {
+	Name        string
+	Description string
+	Parameters  map[string]interface{}
+}
+
+// Schemas returns the schema of every workspace tool. The normalizing proxy
+// uses these to inject a `tools` array into outbound requests, because
+// AgenticGoKit's OpenAI adapter does not send tool definitions itself. No path
+// is resolved here, so a nil workspace is fine.
+func Schemas() []Schema {
+	defs := toolDefs(nil)
+	out := make([]Schema, 0, len(defs))
+	for _, d := range defs {
+		ws, ok := d.(vnext.ToolWithSchema)
+		if !ok {
+			continue
+		}
+		out = append(out, Schema{
+			Name:        d.Name(),
+			Description: d.Description(),
+			Parameters:  ws.JSONSchema(),
+		})
+	}
+	return out
 }
 
 func ok(content interface{}) *vnext.ToolResult {

@@ -1,0 +1,72 @@
+package llmproxy
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+// TestProxyRoundTrip verifies the proxy re-prefixes the upstream path, injects
+// the tools array into the request, and rewrites a native (Mistral) tool call
+// in the response into canonical TOOL_CALL text that the OpenAI adapter (which
+// reads only message.content) will see.
+func TestProxyRoundTrip(t *testing.T) {
+	var gotPath string
+	var gotTools []interface{}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		var body map[string]interface{}
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &body)
+		gotTools, _ = body["tools"].([]interface{})
+
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"choices":[{"message":{"role":"assistant",`+
+			`"content":"[TOOL_CALLS]read_file[ARGS]{\"path\":\"main.go\"}"},`+
+			`"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	px, err := Start(upstream.URL+"/v1", []Tool{
+		{Name: "read_file", Description: "read a file", Parameters: map[string]interface{}{"type": "object"}},
+	})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer px.Close()
+
+	// Mimic what AgenticGoKit's OpenAI adapter does: POST BaseURL+/chat/completions.
+	resp, err := http.Post(px.BaseURL()+"/chat/completions", "application/json",
+		strings.NewReader(`{"model":"m","messages":[{"role":"user","content":"hi"}]}`))
+	if err != nil {
+		t.Fatalf("POST: %v", err)
+	}
+	defer resp.Body.Close()
+	out, _ := io.ReadAll(resp.Body)
+
+	if gotPath != "/v1/chat/completions" {
+		t.Errorf("upstream path = %q, want /v1/chat/completions", gotPath)
+	}
+	if len(gotTools) != 1 {
+		t.Errorf("upstream received %d tools, want 1", len(gotTools))
+	}
+
+	var decoded struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(out, &decoded); err != nil {
+		t.Fatalf("decode response: %v\nbody: %s", err, out)
+	}
+	content := decoded.Choices[0].Message.Content
+	if !strings.Contains(content, `TOOL_CALL{"name":"read_file"`) {
+		t.Errorf("response content not normalized: %q", content)
+	}
+}

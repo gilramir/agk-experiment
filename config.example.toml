@@ -21,6 +21,17 @@ api_key     = ""              # often unused by local servers
 temperature = 0.0
 max_tokens  = 4096
 
+# Tool-call protocol normalization. Different open models (GPT-OSS, Gemma,
+# Mistral/devmistral, Nemotron, Llama 3.x) emit tool calls in their own native syntax,
+# which AgenticGoKit's text parser doesn't recognize. With this on, requests go
+# through an in-process proxy that rewrites those into the form the agent
+# parses, and advertises the workspace tools to the model. Leave on unless your
+# model already emits a recognized format (then set normalize_tool_calls=false),
+# or your server rejects requests carrying a tools array (set inject_tools=false).
+#   env: TESTDIAG_LLM_NORMALIZE_TOOL_CALLS, TESTDIAG_LLM_INJECT_TOOLS
+normalize_tool_calls = true
+inject_tools         = true
+
 [workspace]
 # The local checkout the Jenkins build ran against. TEST_AGENT.md is read from
 # the root of this directory and added to the prompt as project context.
