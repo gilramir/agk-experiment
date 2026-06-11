@@ -39,22 +39,51 @@ func New(root string) (*Workspace, error) {
 // Root returns the absolute workspace root.
 func (w *Workspace) Root() string { return w.root }
 
-// Resolve turns a caller-supplied (possibly relative) path into an absolute
-// path guaranteed to live inside the workspace. Paths that escape the root via
-// "..", absolute paths, or symlinks are rejected.
+// Resolve turns a caller-supplied path into an absolute path guaranteed to live
+// inside the workspace. The input may be:
+//   - workspace-relative ("src/Foo.java") — the normal, documented form;
+//   - absolute and already inside the workspace ("/checkout/src/Foo.java") —
+//     accepted as-is, so an absolute path from the mapper or the model works
+//     instead of being re-rooted into a doubled, nonexistent path;
+//   - absolute but outside the workspace ("/etc/passwd") — reinterpreted
+//     relative to the root so it cannot escape the jail.
+//
+// Paths that escape the root via "..", or via a symlink, are rejected. Resolve
+// is idempotent: feeding it a path it previously returned yields the same file.
 func (w *Workspace) Resolve(p string) (string, error) {
 	if p == "" {
 		return "", fmt.Errorf("empty path")
 	}
 
-	// Treat the input as relative to the workspace root. An absolute input is
-	// reinterpreted relative to the root rather than the real filesystem root.
-	rel := p
+	// Build the in-jail interpretations, most-specific first, and prefer
+	// whichever actually exists. This is what makes Resolve idempotent: an
+	// absolute path already inside the root is kept verbatim rather than being
+	// re-rooted onto the root a second time (which produced a doubled,
+	// nonexistent path and sent the agent into a retry loop).
+	clean := filepath.Clean(p)
+	var candidates []string
 	if filepath.IsAbs(p) {
-		rel = strings.TrimPrefix(p, string(filepath.Separator))
+		// Recover from a doubled root prefix ("/root/root/x" -> "/root/x"),
+		// which is what happens when the model prepends the workspace root to a
+		// path that was already absolute.
+		if deduped := w.dedupRoot(clean); deduped != clean && within(w.root, deduped) {
+			candidates = append(candidates, deduped)
+		}
+		// An absolute path already inside the jail is kept verbatim.
+		if within(w.root, clean) {
+			candidates = append(candidates, clean)
+		}
 	}
-	abs := filepath.Join(w.root, rel)
-	abs = filepath.Clean(abs)
+	rel := strings.TrimPrefix(clean, string(filepath.Separator))
+	candidates = append(candidates, filepath.Clean(filepath.Join(w.root, rel)))
+
+	abs := candidates[0]
+	for _, c := range candidates {
+		if _, err := os.Lstat(c); err == nil {
+			abs = c
+			break
+		}
+	}
 
 	// Resolve symlinks on the deepest existing ancestor, then re-check the
 	// prefix so a symlink pointing outside the jail cannot be followed.
@@ -77,6 +106,20 @@ func (w *Workspace) Rel(abs string) string {
 		return r
 	}
 	return abs
+}
+
+// dedupRoot collapses one or more accidentally doubled root prefixes, e.g.
+// "/root/root/x" -> "/root/x". Returns p unchanged when there is no doubling.
+// Used as a recovery candidate only; the result is still subject to the jail
+// check in Resolve, so this can never widen access.
+func (w *Workspace) dedupRoot(p string) string {
+	sep := string(filepath.Separator)
+	rootRel := strings.TrimPrefix(w.root, sep) // root without its leading separator
+	doubled := w.root + sep + rootRel + sep    // e.g. "/a/b/c/" + "a/b/c/"
+	for strings.HasPrefix(p, doubled) {
+		p = w.root + sep + strings.TrimPrefix(p, doubled)
+	}
+	return p
 }
 
 func within(root, path string) bool {

@@ -30,6 +30,7 @@ Method:
 4. Separate the ROOT CAUSE (the underlying defect or condition) from the SYMPTOM (the assertion that happened to fire).
 
 Rules:
+- Tool PATH arguments are always WORKSPACE-RELATIVE (e.g. "src/main/java/com/acme/Foo.java"). Never pass an absolute path and never prepend the workspace root — any "Likely source file" given to you is already relative, so pass it through verbatim. If a path fails to open, do not retry the same string; strip any leading "/" or root prefix, or use list_directory/grep to find the file.
 - Cite evidence: reference the actual file paths and line numbers you read.
 - Do not invent code you have not read. If the cause is genuinely ambiguous, give the most likely cause and say what would confirm it.
 - When finished, STOP calling tools and reply with your final analysis only, as Markdown with exactly these sections:

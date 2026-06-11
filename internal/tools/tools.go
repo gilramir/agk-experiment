@@ -153,7 +153,10 @@ func (t *readFileTool) Execute(ctx context.Context, args map[string]interface{})
 	}
 	info, err := os.Stat(abs)
 	if err != nil {
-		return fail("read_file: %v", err)
+		return fail("read_file: cannot open %q: %v. Paths must be WORKSPACE-RELATIVE "+
+			"(e.g. %q) — do not pass an absolute path or prefix it with the workspace root. "+
+			"Retry with the path relative to the workspace root, or use list_directory/grep to locate it.",
+			path, err, t.ws.Rel(abs))
 	}
 	if info.IsDir() {
 		return fail("read_file: %q is a directory (use list_directory)", path)
