@@ -56,6 +56,41 @@ func TestSearchRepo(t *testing.T) {
 	}
 }
 
+func TestSearchRepoRefusesLogHuntWhenWithheld(t *testing.T) {
+	ws, _ := setupWS(t)
+	tool := &searchRepoTool{ws: ws}
+
+	// With logs withheld (DEEPINSPECT), a query naming a log file is refused.
+	SetLogToolsEnabled(false)
+	defer SetLogToolsEnabled(true)
+	for _, q := range []string{"failure.log", "log.txt", "*.log"} {
+		res, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": q})
+		if err == nil || (res != nil && res.Success) {
+			t.Errorf("expected refusal for log-hunt pattern %q", q)
+		}
+	}
+	// Also refuse it via the include glob.
+	if res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"pattern": "anything", "include": "*.log",
+	}); err == nil || res.Success {
+		t.Error("expected refusal for include=*.log")
+	}
+
+	// A legitimate source search is NOT refused even when logs are withheld,
+	// including a content pattern that merely mentions ".log".
+	for _, q := range []string{"def connect", `\.log\(`, "logger"} {
+		if res, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": q}); err != nil || !res.Success {
+			t.Errorf("source search %q should succeed when logs withheld: %v", q, err)
+		}
+	}
+
+	// When logs are NOT withheld (other contexts), the guard is inactive.
+	SetLogToolsEnabled(true)
+	if res, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": "failure.log"}); err != nil || !res.Success {
+		t.Errorf("log-named search should run when logs not withheld: %v", err)
+	}
+}
+
 func TestSearchRepoExcludesReportDir(t *testing.T) {
 	ws, root := setupWS(t)
 	// A report directory inside the checkout that holds a generated report

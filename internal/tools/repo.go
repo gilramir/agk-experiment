@@ -77,6 +77,15 @@ func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{
 	if !has {
 		return fail("search_repo: 'pattern' is required")
 	}
+	// When the raw log is withheld (DEEPINSPECT), refuse a search that is clearly
+	// hunting for a log file (e.g. "failure.log", "log.txt", "*.log") rather than
+	// source code: there is no failure log in the workspace — it was consumed by
+	// the earlier stage and everything from it is in the investigation brief.
+	if !logToolsEnabled.Load() {
+		if q := logHuntQuery(args); q != "" {
+			return fail("search_repo: %q looks like an attempt to find a log file. There is no failure log in the workspace — it was consumed by the earlier stage and everything relevant is already in the investigation brief. Do NOT search for logs; go straight to the SOURCE files the brief names.", q)
+		}
+	}
 	expr := pattern
 	if boolArg(args, "ignore_case") {
 		expr = "(?i)" + expr
@@ -141,6 +150,25 @@ func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{
 		"count":     len(matches),
 		"truncated": truncated,
 	}), nil
+}
+
+// logFileQueryRe matches a query whose ENTIRETY names a log file — e.g.
+// "failure.log", "log.txt", "*.log", "logs/app.log" — as opposed to a content
+// search that merely mentions ".log" (like the pattern "\.log\("), which is left
+// alone. The whole-string anchors keep it from flagging legitimate source
+// searches.
+var logFileQueryRe = regexp.MustCompile(`(?i)^[\w./*?-]*?([\w*?-]*\.log|log\.txt)$`)
+
+// logHuntQuery returns the first search_repo argument (the grep pattern, the
+// include glob, or the path) that looks like an attempt to locate a log file, or
+// "" if none does.
+func logHuntQuery(args map[string]interface{}) string {
+	for _, key := range []string{"pattern", "include", "path"} {
+		if v, ok := strArg(args, key); ok && logFileQueryRe.MatchString(strings.TrimSpace(v)) {
+			return v
+		}
+	}
+	return ""
 }
 
 // ---------------------------------------------------------------------------
