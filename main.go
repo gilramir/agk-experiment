@@ -132,7 +132,7 @@ func run() error {
 	// so the full conversation can be logged when debugging. This rewrites
 	// cfg.LLM.BaseURL to the local proxy. Debug needs the proxy too, so start it
 	// whenever either is requested.
-	if cfg.LLM.NormalizeToolCalls || cfg.LLM.Debug {
+	if cfg.LLM.NormalizeToolCalls || cfg.LLM.Debug || opts.Verbose {
 		var proxyTools []llmproxy.Tool
 		if cfg.LLM.NormalizeToolCalls && cfg.LLM.InjectTools {
 			for _, s := range tools.Schemas() {
@@ -147,6 +147,7 @@ func run() error {
 			Tools:     proxyTools,
 			Normalize: cfg.LLM.NormalizeToolCalls,
 			Debug:     cfg.LLM.Debug,
+			Verbose:   opts.Verbose,
 		})
 		if err != nil {
 			return fmt.Errorf("starting LLM proxy: %w", err)

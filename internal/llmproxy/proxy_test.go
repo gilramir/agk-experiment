@@ -117,3 +117,49 @@ func TestScrubContinuationNudge(t *testing.T) {
 		t.Errorf("replacement not applied: %q", gotContent)
 	}
 }
+
+// TestDescribeChoiceBrief checks the verbose heartbeat summary recognizes tool
+// calls (from normalized TOOL_CALL text and from a structured tool_calls field)
+// and falls back to a text-length summary, appending finish_reason.
+func TestDescribeChoiceBrief(t *testing.T) {
+	cases := []struct {
+		name   string
+		choice map[string]interface{}
+		want   string
+	}{
+		{
+			name: "normalized tool call text",
+			choice: map[string]interface{}{
+				"finish_reason": "stop",
+				"message":       map[string]interface{}{"content": `TOOL_CALL{"name":"search_repo","args":{}}`},
+			},
+			want: "tool call(s): search_repo, finish=stop",
+		},
+		{
+			name: "structured tool_calls field",
+			choice: map[string]interface{}{
+				"message": map[string]interface{}{
+					"tool_calls": []interface{}{
+						map[string]interface{}{"function": map[string]interface{}{"name": "read_file"}},
+					},
+				},
+			},
+			want: "tool call(s): read_file",
+		},
+		{
+			name: "plain text",
+			choice: map[string]interface{}{
+				"finish_reason": "stop",
+				"message":       map[string]interface{}{"content": "hello"},
+			},
+			want: "text reply (5 chars), finish=stop",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := describeChoiceBrief(tc.choice); got != tc.want {
+				t.Errorf("describeChoiceBrief() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

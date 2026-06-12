@@ -16,6 +16,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	vnext "github.com/agenticgokit/agenticgokit/v1beta"
 
@@ -68,16 +69,84 @@ func vlogf(format string, args ...interface{}) {
 
 // Register registers all workspace tools against ws. Call once at startup,
 // before building any agent. The returned slice is the tool names registered
-// (useful for logging / prompt construction).
+// (useful for logging / prompt construction). Each tool is wrapped so that, in
+// verbose mode, every call logs when it starts and finishes — this is the signal
+// that lets an operator tell a running tool from a stalled LLM call.
 func Register(ws *workspace.Workspace) []string {
 	defs := toolDefs(ws)
 	names := make([]string, 0, len(defs))
 	for _, d := range defs {
-		d := d // capture for the factory closure
-		vnext.RegisterInternalTool(d.Name(), func() vnext.Tool { return d })
+		tool := &loggingTool{inner: d} // capture for the factory closure
+		vnext.RegisterInternalTool(d.Name(), func() vnext.Tool { return tool })
 		names = append(names, d.Name())
 	}
 	return names
+}
+
+// loggingTool wraps a tool to emit a start/done progress line around each call
+// when verbose mode is on. It is otherwise transparent, forwarding Name,
+// Description, and JSONSchema so the provider sees the underlying tool unchanged.
+type loggingTool struct{ inner vnext.Tool }
+
+func (t *loggingTool) Name() string        { return t.inner.Name() }
+func (t *loggingTool) Description() string { return t.inner.Description() }
+
+func (t *loggingTool) JSONSchema() map[string]interface{} {
+	if s, ok := t.inner.(vnext.ToolWithSchema); ok {
+		return s.JSONSchema()
+	}
+	return nil
+}
+
+func (t *loggingTool) Execute(ctx context.Context, args map[string]interface{}) (*vnext.ToolResult, error) {
+	if !verbose.Load() {
+		return t.inner.Execute(ctx, args)
+	}
+	name := t.inner.Name()
+	vlogf("%s start: %s", name, briefArgs(args))
+	start := time.Now()
+	res, err := t.inner.Execute(ctx, args)
+	vlogf("%s done in %s%s", name, time.Since(start).Round(time.Millisecond), outcome(res, err))
+	return res, err
+}
+
+// briefArgs renders a tool's arguments as a compact, sorted "key=val" line, with
+// long values truncated, so the progress log stays to one line.
+func briefArgs(args map[string]interface{}) string {
+	if len(args) == 0 {
+		return "(no args)"
+	}
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, k := range keys {
+		s := fmt.Sprintf("%v", args[k])
+		if len(s) > 80 {
+			s = s[:80] + "…"
+		}
+		parts = append(parts, fmt.Sprintf("%s=%q", k, s))
+	}
+	return strings.Join(parts, " ")
+}
+
+// outcome summarizes a tool result for the done line: nothing on success, or a
+// short error/failed marker otherwise.
+func outcome(res *vnext.ToolResult, err error) string {
+	switch {
+	case err != nil:
+		msg := err.Error()
+		if len(msg) > 100 {
+			msg = msg[:100] + "…"
+		}
+		return " [error: " + msg + "]"
+	case res != nil && !res.Success:
+		return " [failed]"
+	default:
+		return ""
+	}
 }
 
 // Schema is a tool's name, description, and JSON-schema parameters — enough to

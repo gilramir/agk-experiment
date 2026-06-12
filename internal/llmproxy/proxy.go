@@ -32,6 +32,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -57,6 +58,11 @@ type Options struct {
 	Normalize bool
 	// Debug logs the full request/response conversation with the LLM to stderr.
 	Debug bool
+	// Verbose logs a one-line heartbeat per LLM request and response (message and
+	// tool counts, and any tool calls requested) so an operator can see the
+	// round-trips and tell a slow LLM call from a running tool. Debug supersedes
+	// it (the full log already shows everything).
+	Verbose bool
 }
 
 // Proxy is a running normalizing reverse proxy. Close it when done.
@@ -84,6 +90,7 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 
 	openAITools := toOpenAITools(opts.Tools)
 	debug := opts.Debug
+	verbose := opts.Verbose
 	normalize := opts.Normalize
 	var reqCounter atomic.Uint64
 
@@ -100,6 +107,7 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 
 			isChat := isChatCompletions(reqPath)
 			inject := isChat && len(openAITools) > 0
+			heartbeat := verbose && isChat && !debug
 			if !isChat && !debug {
 				return
 			}
@@ -113,15 +121,19 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 			if isChat {
 				scrubContinuationNudge(body)
 			}
-			if debug {
+			if debug || heartbeat {
 				id := reqCounter.Add(1)
 				*req = *req.WithContext(context.WithValue(req.Context(), debugIDKey{}, id))
-				logRequest(id, reqPath, body)
+				if debug {
+					logRequest(id, reqPath, body)
+				} else {
+					logRequestBrief(id, reqPath, body)
+				}
 			}
 			setBody(req, body, raw)
 		},
 		ModifyResponse: func(resp *http.Response) error {
-			return modifyResponse(resp, normalize, debug)
+			return modifyResponse(resp, normalize, debug, verbose)
 		},
 	}
 
@@ -217,8 +229,8 @@ func stripNudge(s string) (string, bool) {
 // modifyResponse optionally normalizes tool-call syntax in a chat-completions
 // JSON response and/or logs it. Non-JSON and streaming responses pass through
 // untouched.
-func modifyResponse(resp *http.Response, normalize, debug bool) error {
-	if !normalize && !debug {
+func modifyResponse(resp *http.Response, normalize, debug, verbose bool) error {
+	if !normalize && !debug && !verbose {
 		return nil
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -247,6 +259,9 @@ func modifyResponse(resp *http.Response, normalize, debug bool) error {
 	if debug {
 		id, _ := resp.Request.Context().Value(debugIDKey{}).(uint64)
 		logResponse(id, body)
+	} else if verbose {
+		id, _ := resp.Request.Context().Value(debugIDKey{}).(uint64)
+		logResponseBrief(id, body)
 	}
 
 	if !changed {
@@ -365,6 +380,73 @@ func logResponse(id uint64, body map[string]interface{}) {
 		}
 	}
 	fmt.Fprintln(os.Stderr, strings.Repeat("=", 40))
+}
+
+// toolCallNameRE extracts tool names from canonical TOOL_CALL text so the brief
+// response heartbeat can report which tools the model asked for.
+var toolCallNameRE = regexp.MustCompile(`TOOL_CALL\s*\{\s*"name"\s*:\s*"([^"]+)"`)
+
+// logRequestBrief prints a one-line heartbeat for an outgoing request: message
+// count and advertised tool count. Used in verbose (non-debug) mode.
+func logRequestBrief(id uint64, path string, body map[string]interface{}) {
+	debugMu.Lock()
+	defer debugMu.Unlock()
+	msgs, _ := body["messages"].([]interface{})
+	tools, _ := body["tools"].([]interface{})
+	fmt.Fprintf(os.Stderr, "[llm] -> request #%d %s: %d message(s), %d tool(s) advertised\n",
+		id, path, len(msgs), len(tools))
+}
+
+// logResponseBrief prints a one-line heartbeat for a response: which tool(s) the
+// model asked for, or the size of a plain-text answer, plus finish_reason.
+func logResponseBrief(id uint64, body map[string]interface{}) {
+	debugMu.Lock()
+	defer debugMu.Unlock()
+	desc := "no choices"
+	if choices, ok := body["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			desc = describeChoiceBrief(choice)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[llm] <- response #%d: %s\n", id, desc)
+}
+
+// describeChoiceBrief summarizes one response choice: the tool calls it requests
+// (from normalized TOOL_CALL text, or a still-structured tool_calls field), or
+// the length of a plain-text reply, with the finish_reason appended.
+func describeChoiceBrief(choice map[string]interface{}) string {
+	finish, _ := choice["finish_reason"].(string)
+	suffix := ""
+	if finish != "" {
+		suffix = ", finish=" + finish
+	}
+	msg, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return "no message" + suffix
+	}
+
+	var names []string
+	content := contentString(msg["content"])
+	for _, m := range toolCallNameRE.FindAllStringSubmatch(content, -1) {
+		names = append(names, m[1])
+	}
+	if len(names) == 0 {
+		if tc, ok := msg["tool_calls"].([]interface{}); ok {
+			for _, t := range tc {
+				if tm, ok := t.(map[string]interface{}); ok {
+					if fn, ok := tm["function"].(map[string]interface{}); ok {
+						if n, ok := fn["name"].(string); ok {
+							names = append(names, n)
+						}
+					}
+				}
+			}
+		}
+	}
+	if len(names) > 0 {
+		return "tool call(s): " + strings.Join(names, ", ") + suffix
+	}
+	return fmt.Sprintf("text reply (%d chars)%s", len(content), suffix)
 }
 
 func logToolCall(t interface{}) {

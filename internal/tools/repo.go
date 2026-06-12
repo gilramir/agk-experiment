@@ -1,15 +1,16 @@
 package tools
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	vnext "github.com/agenticgokit/agenticgokit/v1beta"
 
@@ -80,10 +81,6 @@ func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{
 	}
 	include, hasInclude := strArg(args, "include")
 
-	vlogf("search_repo start: pattern=%q path=%q include=%q ignore_case=%t",
-		pattern, base, include, boolArg(args, "ignore_case"))
-	start := time.Now()
-
 	var matches []map[string]interface{}
 	filesScanned := 0
 	truncated := false
@@ -115,32 +112,15 @@ func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{
 		}
 		filesScanned++
 
-		data, _, rerr := readCapped(abs)
-		if rerr != nil || isBinary(data) {
-			return nil
-		}
-		rel := t.ws.Rel(abs)
-		for i, line := range strings.Split(string(data), "\n") {
-			if re.MatchString(line) {
-				if len(matches) >= maxRepoMatches {
-					truncated = true
-					return filepath.SkipAll
-				}
-				matches = append(matches, map[string]interface{}{
-					"path": filepath.ToSlash(rel),
-					"line": i + 1,
-					"text": strings.TrimRight(line, "\r"),
-				})
-			}
+		if searchFile(abs, t.ws.Rel(abs), re, &matches) {
+			truncated = true
+			return filepath.SkipAll
 		}
 		return nil
 	})
 	if walkErr != nil && ctx.Err() != nil {
 		return fail("search_repo: %v", ctx.Err())
 	}
-
-	vlogf("search_repo done: %d match(es) across %d file(s) in %s (truncated=%t)",
-		len(matches), filesScanned, time.Since(start).Round(time.Millisecond), truncated)
 
 	return ok(map[string]interface{}{
 		"matches":   matches,
@@ -185,9 +165,6 @@ func (t *findFilesTool) Execute(ctx context.Context, args map[string]interface{}
 	}
 	ci := boolArg(args, "ignore_case")
 
-	vlogf("find_files start: pattern=%q path=%q ignore_case=%t", pattern, base, ci)
-	start := time.Now()
-
 	var paths []string
 	filesScanned := 0
 	truncated := false
@@ -225,9 +202,6 @@ func (t *findFilesTool) Execute(ctx context.Context, args map[string]interface{}
 	}
 	sort.Strings(paths)
 
-	vlogf("find_files done: %d path(s) across %d file(s) in %s (truncated=%t)",
-		len(paths), filesScanned, time.Since(start).Round(time.Millisecond), truncated)
-
 	return ok(map[string]interface{}{
 		"paths":     paths,
 		"count":     len(paths),
@@ -260,25 +234,77 @@ func matchPath(pattern, rel, base string, ci bool) bool {
 	return strings.Contains(hay, needle)
 }
 
+// binarySniffLen is how many leading bytes searchFile inspects to decide a file
+// is binary before scanning it line by line.
+const binarySniffLen = 8000
+
+// searchFile scans one file line by line for re, appending matches (capped at
+// maxRepoMatches across the whole walk) to *matches. It STREAMS the file with a
+// small buffer — reading at most maxFileBytes — rather than loading the whole
+// file into memory, and skips files that look binary from their first bytes.
+// Returns true when the global match cap is reached so the walk can stop.
+//
+// This is the hot path of search_repo: it runs once per regular file in the
+// tree, so it must not allocate per-file buffers proportional to maxFileBytes.
+func searchFile(abs, rel string, re *regexp.Regexp, matches *[]map[string]interface{}) (capped bool) {
+	f, err := os.Open(abs)
+	if err != nil {
+		return false // unreadable: skip, like the rest of the walk
+	}
+	defer f.Close()
+
+	r := bufio.NewReaderSize(io.LimitReader(f, maxFileBytes), 64*1024)
+	if head, _ := r.Peek(binarySniffLen); isBinary(head) {
+		return false
+	}
+	relSlash := filepath.ToSlash(rel)
+	sc := bufio.NewScanner(r)
+	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
+	line := 0
+	for sc.Scan() {
+		line++
+		text := sc.Text()
+		if !re.MatchString(text) {
+			continue
+		}
+		if len(*matches) >= maxRepoMatches {
+			return true
+		}
+		*matches = append(*matches, map[string]interface{}{
+			"path": relSlash,
+			"line": line,
+			"text": strings.TrimRight(text, "\r"),
+		})
+	}
+	return false
+}
+
 // isBinary reports whether data looks like a binary file (contains a NUL byte in
 // the leading window), so the text tools can skip it.
 func isBinary(data []byte) bool {
-	const window = 8000
-	if len(data) > window {
-		data = data[:window]
+	if len(data) > binarySniffLen {
+		data = data[:binarySniffLen]
 	}
 	return bytes.IndexByte(data, 0) >= 0
 }
 
 // readCapped reads up to maxFileBytes of a file, reporting whether it was
-// truncated. Used by the tree walkers and the log tools.
+// truncated. Used by the log tools to read a whole (usually large) log. The
+// buffer is sized to the file (capped at maxFileBytes+1) so reading a small file
+// doesn't allocate the full cap.
 func readCapped(abs string) (data []byte, truncated bool, err error) {
 	f, err := os.Open(abs)
 	if err != nil {
 		return nil, false, err
 	}
 	defer f.Close()
-	buf := make([]byte, maxFileBytes+1)
+	size := maxFileBytes + 1
+	if fi, err := f.Stat(); err == nil {
+		if s := fi.Size(); s >= 0 && s < int64(maxFileBytes) {
+			size = int(s) + 1
+		}
+	}
+	buf := make([]byte, size)
 	n, _ := readFull(f, buf)
 	if n > maxFileBytes {
 		return buf[:maxFileBytes], true, nil
