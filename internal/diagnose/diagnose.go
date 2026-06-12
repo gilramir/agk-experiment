@@ -29,10 +29,20 @@ const logDir = ".testdiag/logs"
 // workspace root, so the notebook tool (jailed like the rest) can read/write it.
 const notebookDir = ".testdiag/notes"
 
-// maxToolIterations caps the native tool-calling loop per test. It is generous
-// because a flaky failure often requires tracing across the Python client / C++
-// server boundary, which takes many reads.
-const maxToolIterations = 30
+// defaultMaxToolIterations caps the native tool-calling loop within a single
+// attempt when config leaves it unset. It is generous because a flaky failure
+// often requires tracing across the Python client / C++ server boundary, which
+// takes many reads. Override via diagnosis.max_tool_iterations.
+const defaultMaxToolIterations = 50
+
+// maxToolIterations is the per-attempt tool-call cap from config, falling back to
+// the default if unset.
+func (d *Diagnoser) maxToolIterations() int {
+	if d.cfg.Diagnosis.MaxToolIterations > 0 {
+		return d.cfg.Diagnosis.MaxToolIterations
+	}
+	return defaultMaxToolIterations
+}
 
 // Result is the outcome of diagnosing one test.
 type Result struct {
@@ -241,7 +251,7 @@ func (d *Diagnoser) buildAgent(test jenkins.FailedTest) (vnext.Agent, error) {
 				Enabled: true,
 				Reasoning: &vnext.ReasoningConfig{
 					Enabled:           true,
-					MaxIterations:     maxToolIterations,
+					MaxIterations:     d.maxToolIterations(),
 					ContinueOnToolUse: true,
 				},
 			},

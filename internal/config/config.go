@@ -71,6 +71,11 @@ type Diagnosis struct {
 	// shallow (didn't explore source / didn't identify a flakiness mechanism).
 	// A value of 1 disables the loop.
 	MaxAttempts int `toml:"max_attempts"`
+	// MaxToolIterations caps the native tool-calling loop within a SINGLE attempt
+	// (one agent.Run): how many times the agent may call a tool and feed the
+	// result back before it must produce an answer. The worst-case number of LLM
+	// round-trips per test is therefore MaxAttempts * MaxToolIterations.
+	MaxToolIterations int `toml:"max_tool_iterations"`
 }
 
 // Output controls how diagnosis reports are written.
@@ -131,7 +136,8 @@ func defaults() *Config {
 			Dir: "test-diagnosis",
 		},
 		Diagnosis: Diagnosis{
-			MaxAttempts: 2,
+			MaxAttempts:       3,
+			MaxToolIterations: 50,
 		},
 	}
 }
@@ -156,6 +162,7 @@ func applyEnvOverrides(cfg *Config) {
 	setStr(&cfg.Output.Dir, "TESTDIAG_OUTPUT_DIR")
 
 	setInt(&cfg.Diagnosis.MaxAttempts, "TESTDIAG_MAX_ATTEMPTS")
+	setInt(&cfg.Diagnosis.MaxToolIterations, "TESTDIAG_MAX_TOOL_ITERATIONS")
 }
 
 func (c *Config) validate() error {
@@ -167,6 +174,9 @@ func (c *Config) validate() error {
 	}
 	if c.Diagnosis.MaxAttempts < 1 {
 		c.Diagnosis.MaxAttempts = 1
+	}
+	if c.Diagnosis.MaxToolIterations < 1 {
+		c.Diagnosis.MaxToolIterations = 50
 	}
 	return nil
 }

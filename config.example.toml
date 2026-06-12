@@ -43,3 +43,9 @@ root = ""
 #   env: TESTDIAG_OUTPUT_DIR
 dir = "test-diagnosis"   # one Markdown report per failed test is written here
 # Failed tests are diagnosed one at a time, in order.
+
+[diagnosis]
+#   env: TESTDIAG_MAX_ATTEMPTS, TESTDIAG_MAX_TOOL_ITERATIONS
+max_attempts        = 3    # agent runs per test; >1 enables the critique/revise loop (1 disables it)
+max_tool_iterations = 50   # tool calls allowed within one attempt
+# Worst-case LLM round-trips per test = max_attempts * max_tool_iterations.
