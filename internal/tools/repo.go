@@ -27,13 +27,27 @@ const (
 
 // skipDirs are directory names never descended into by search_repo / find_files.
 // They are either VCS metadata, dependency caches, build output, or our own log
-// directory — none of which is the project source the diagnosis cares about.
+// directory — none of which is the project source the diagnosis cares about. The
+// report output directory is added at startup via ExcludeDir so a tree search
+// never reads the tool's own generated reports back in.
 var skipDirs = map[string]bool{
 	".git": true, ".hg": true, ".svn": true,
 	"node_modules": true, "vendor": true,
 	"__pycache__": true, ".mypy_cache": true, ".pytest_cache": true,
 	".testdiag": true,
 	"build":     true, "dist": true, ".tox": true, ".venv": true,
+}
+
+// ExcludeDir adds a directory base name to the set that search_repo and
+// find_files never descend into. Call once at startup, before any agent runs
+// (the set is read concurrently by the walkers but not mutated after). Used to
+// skip the generated report directory, whose name is configurable. Trivial names
+// ("", ".", "..") are ignored.
+func ExcludeDir(name string) {
+	if name == "" || name == "." || name == ".." {
+		return
+	}
+	skipDirs[name] = true
 }
 
 // ---------------------------------------------------------------------------

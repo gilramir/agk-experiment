@@ -56,6 +56,30 @@ func TestSearchRepo(t *testing.T) {
 	}
 }
 
+func TestSearchRepoExcludesReportDir(t *testing.T) {
+	ws, root := setupWS(t)
+	// A report directory inside the checkout that holds a generated report
+	// mentioning the same symbol; ExcludeDir should keep the search out of it.
+	abs := filepath.Join(root, "test-diagnosis", "report.md")
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(abs, []byte("the root cause is in def connect\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	ExcludeDir("test-diagnosis")
+
+	tool := &searchRepoTool{ws: ws}
+	res, err := tool.Execute(context.Background(), map[string]interface{}{"pattern": `def connect`})
+	if err != nil {
+		t.Fatal(err)
+	}
+	matches := res.Content.(map[string]interface{})["matches"].([]map[string]interface{})
+	if len(matches) != 1 || matches[0]["path"] != "client/foo_client.py" {
+		t.Fatalf("report dir not excluded; matches: %v", matches)
+	}
+}
+
 func TestFindFiles(t *testing.T) {
 	ws, _ := setupWS(t)
 	tool := &findFilesTool{ws: ws}

@@ -123,8 +123,11 @@ func run() error {
 
 	background := readBackground(ws.Root())
 
-	// Register the workspace file tools once, before any agent is built.
+	// Register the workspace file tools once, before any agent is built. Exclude
+	// the report output directory from tree searches so the agent never reads its
+	// own generated reports back in (the output dir often lives in the checkout).
 	tools.SetVerbose(opts.Verbose)
+	tools.ExcludeDir(filepath.Base(cfg.Output.Dir))
 	toolNames := tools.Register(ws)
 
 	// Front the LLM endpoint with the in-process proxy so models with differing
