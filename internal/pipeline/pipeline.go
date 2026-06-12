@@ -59,13 +59,13 @@ type Pipeline struct {
 
 // New builds the DOWNLOAD → LOGPARSE → DEEPINSPECT pipeline. logparseLLM and
 // deepinspectLLM are the LLMs assigned to those stages; background is the
-// TEST_AGENT.md content (may be "").
-func New(cfg *config.Config, ws *workspace.Workspace, logparseLLM, deepinspectLLM config.LLMSpec, background string) *Pipeline {
+// TEST_AGENT.md content (may be ""). verbose enables per-stage progress output.
+func New(cfg *config.Config, ws *workspace.Workspace, logparseLLM, deepinspectLLM config.LLMSpec, background string, verbose bool) *Pipeline {
 	return &Pipeline{
 		stages: []Stage{
 			&downloadStage{ws: ws},
 			newLogParseStage(ws, logparseLLM),
-			newDeepInspectStage(diagnose.New(cfg, ws, deepinspectLLM, background)),
+			newDeepInspectStage(diagnose.New(cfg, ws, deepinspectLLM, background), verbose),
 		},
 	}
 }

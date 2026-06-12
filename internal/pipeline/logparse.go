@@ -47,13 +47,35 @@ func (s *logParseStage) Run(ctx context.Context, sc *Context) error {
 	if strings.TrimSpace(r.Content) == "" {
 		return fmt.Errorf("agent returned empty brief for %s", sc.Test.FullName())
 	}
-	rel, err := s.writeBrief(sc.Test, r.Content)
+	brief := ensureTestFile(r.Content, sc.Test)
+	rel, err := s.writeBrief(sc.Test, brief)
 	if err != nil {
 		return err
 	}
 	sc.LogParsePath = rel
-	sc.Brief = r.Content
+	sc.Brief = brief
 	return nil
+}
+
+// ensureTestFile appends the test's class name to the brief when the brief does
+// not already contain it. LOGPARSE extracts file references from the log, but
+// the test class itself (the file the failing test lives in) may not appear in
+// the log output — this makes sure DEEPINSPECT always has that starting point.
+func ensureTestFile(brief string, test jenkins.FailedTest) string {
+	if test.ClassName == "" {
+		return brief
+	}
+	// The "class" segment (last dotted component) is what find_files patterns key
+	// off in every supported language: TestFoo.java, test_foo.py, foo_test.go.
+	cls := test.ClassName
+	if i := strings.LastIndex(cls, "."); i >= 0 {
+		cls = cls[i+1:]
+	}
+	if strings.Contains(brief, cls) {
+		return brief
+	}
+	return strings.TrimRight(brief, "\n") +
+		fmt.Sprintf("\nThe test file that failed is: %s\n", test.ClassName)
 }
 
 // buildAgent constructs a tool-less, memoryless single-pass agent on the

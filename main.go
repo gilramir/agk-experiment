@@ -174,7 +174,7 @@ func run() error {
 		}
 	}
 
-	pl := pipeline.New(cfg, ws, logparseLLM, deepinspectLLM, background)
+	pl := pipeline.New(cfg, ws, logparseLLM, deepinspectLLM, background, opts.Verbose)
 
 	fmt.Printf("Found %d failed test(s). Workspace: %s\n", len(failures), ws.Root())
 	fmt.Printf("Pipeline: %v\n", pl.States())

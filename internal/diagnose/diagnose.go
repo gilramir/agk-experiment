@@ -98,7 +98,7 @@ func (d *Diagnoser) Diagnose(ctx context.Context, test jenkins.FailedTest, logRe
 	tools.SetLogToolsEnabled(false)
 	defer tools.SetLogToolsEnabled(true)
 
-	agent, err := d.buildAgent(test)
+	agent, err := d.buildAgent(test, brief)
 	if err != nil {
 		return Result{}, fmt.Errorf("building agent for %s: %w", test.FullName(), err)
 	}
@@ -248,12 +248,17 @@ func toolArgPath(args map[string]interface{}) string {
 // attach via Tools.Enabled alone (createTools -> DiscoverInternalTools), and the
 // ChatAgent preset would clobber our SystemPrompt/Temperature/MaxTokens and
 // re-enable memory after WithConfig.
-func (d *Diagnoser) buildAgent(test jenkins.FailedTest) (vnext.Agent, error) {
+//
+// The brief is injected into the system prompt (not only the user message) because
+// AGK's continuation loop (executeNativeToolsAndContinue) preserves System across
+// every iteration but replaces User with "Previous response + tool results" — so
+// the user message is dropped after the first round-trip.
+func (d *Diagnoser) buildAgent(test jenkins.FailedTest, brief string) (vnext.Agent, error) {
 	name := "diagnose-" + sanitize(test.FullName())
 	return vnext.NewBuilder(name).
 		WithConfig(&vnext.Config{
 			Name:         name,
-			SystemPrompt: systemPrompt,
+			SystemPrompt: buildSystemPrompt(brief),
 			LLM: vnext.LLMConfig{
 				Provider:    d.llm.Provider,
 				Model:       d.llm.Model,

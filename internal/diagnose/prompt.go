@@ -65,6 +65,21 @@ Rules:
 ## Suggested Fix
 ## Confidence`
 
+// buildSystemPrompt assembles the per-test system prompt by appending the
+// LOGPARSE brief to the static instructions. The brief must survive in the
+// system prompt (not only in the user message) because AGK's continuation loop
+// drops the original user message after the first LLM round-trip and only
+// forwards System + "Previous response + tool results" on each subsequent call.
+func buildSystemPrompt(brief string) string {
+	brief = strings.TrimSpace(brief)
+	if brief == "" {
+		return systemPrompt
+	}
+	return systemPrompt + "\n\n## Investigation brief (from the log-analysis stage)\n" +
+		"The following brief was produced by the earlier log-analysis stage. It names the first real error, the source/logic to trace, and the flakiness conditions to check. Use it as your starting point — the system preserves it here so it is always available to you regardless of how many tool calls have been made.\n\n" +
+		brief
+}
+
 // buildUserPrompt assembles the first user message for a single failing test.
 // It carries the LOGPARSE brief (not the raw log) plus the test identity.
 func buildUserPrompt(test jenkins.FailedTest, m mapping.Result, brief, background string) string {
