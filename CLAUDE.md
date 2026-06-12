@@ -6,9 +6,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `testdiag` is a Go CLI that diagnoses Jenkins test failures with an LLM. Given a
 Jenkins build URL it fetches the test report, and for each failed test it runs a
-per-test AgenticGoKit agent whose native tool-calling loop reads the project's
-source (jailed to the checkout) to find the root cause, writing one Markdown
-report per failure.
+**state machine of stages** — DOWNLOAD (save the log) → LOGPARSE (one tool-less
+LLM pass that distils the log into an investigation brief) → DEEPINSPECT (a fresh
+agent that gets ONLY the brief plus the workspace **source** tools, jailed to the
+checkout, and finds the root cause) — writing one Markdown report per failure.
+Each stage hands off to the next through a Markdown file on disk, and LOGPARSE
+and DEEPINSPECT can run on different (named) LLMs.
 
 See `README.md` for the user-facing description and `plan.txt` for the original
 design notes.
@@ -31,16 +34,32 @@ There is currently **no test suite**; `go test ./...` reports `[no test files]`.
 
 ## Architecture
 
-The pipeline is sequential: fetch failures → diagnose each independently, one at
-a time → write a report each.
+The pipeline is sequential: fetch failures → run each failure through the stage
+state machine independently, one at a time → write a report each.
 
 - **`main.go`** — CLI parsing (`github.com/gilramir/argparse/v2`), config load,
-  and `process()`, which diagnoses failures one at a time, in order. Each failed
-  test is fully independent (no shared agent state); they are run sequentially so
-  the output and the `run_script` approval prompts stay coherent for the operator.
+  resolving the LLM for each stage (`cfg.LLMForStage`), starting the per-stage
+  LLM proxies (a `proxyManager` runs at most one proxy per distinct
+  `(endpoint, advertised tool set)` and repoints each LLM's `BaseURL`), and
+  `process()`, which runs each failure through the `pipeline` one at a time, in
+  order. Each failed test is fully independent (no shared agent state); they are
+  run sequentially so the output and the `run_script` approval prompts stay
+  coherent for the operator.
 - **`internal/config`** — TOML at `~/.config/testdiag/config.toml`, with
   `TESTDIAG_*` env vars overriding the file (env always wins, for CI secrets).
-  `LLM.BaseURL` + `LLM.Model` are required.
+  LLMs are defined once under `[llms.<name>]` (`LLMs map[string]LLMSpec`) and each
+  stage points at one by name under `[stages]` (`Stages map[string]string`);
+  `LLMForStage` resolves the pair and errors clearly if a stage is unassigned or
+  names an undefined LLM. Each referenced LLM needs `base_url` + `model`. Proxy
+  knobs live under `[proxy]`. Per-LLM secrets can come from
+  `TESTDIAG_LLM_<NAME>_{API_KEY,BASE_URL,MODEL}`.
+- **`internal/pipeline`** — the stage state machine. `Pipeline.Run` threads a
+  per-test `Context` through ordered `Stage`s: `download.go` (saves the combined
+  log under `.testdiag/logs/`), `logparse.go` (a tool-less, memoryless single-pass
+  agent on the LOGPARSE LLM that excerpts the log to the model's context window
+  and writes the brief to `.testdiag/handoff/<test>.logparse.md`), and
+  `deepinspect.go` (wraps `internal/diagnose`). Add new stages to the slice in
+  `New`. `combinedLog`/`sanitize` live here (DOWNLOAD owns log materialization).
 - **`internal/jenkins`** — normalizes any build/testReport URL to
   `…/api/json?depth=1`, HTTP Basic auth (user + API **token**, not password),
   parses `suites[].cases[]`, returns cases whose status is FAILED/REGRESSION/ERROR.
@@ -60,7 +79,12 @@ a time → write a report each.
   `vnext.RegisterInternalTool` before any agent is built, so each tool is a
   single shared, **stateless** instance reused across every test — never store
   per-test state on a tool. All have hard output caps (file size, line span,
-  match/entry/file counts) to protect the context window. One exception to the
+  match/entry/file counts) to protect the context window. The two log tools
+  (`read_log`, `grep_log`, named in `tools.LogToolNames`) are gated by a
+  package-level flag: DEEPINSPECT calls `tools.SetLogToolsEnabled(false)` so they
+  refuse to run, and they are also excluded from the tool set it advertises
+  (`tools.SchemasExcluding(tools.LogToolNames...)`) — defense in depth so the deep
+  agent works from the brief, not the raw log. One exception to the
   read-only rule: `run_script` writes and executes a shell/Python script in the
   workspace root, but only after the operator approves the exact script at a
   `1 = Yes / 2 = No` prompt; a decline runs nothing. The other writer is
@@ -75,14 +99,18 @@ a time → write a report each.
   `tools.ResetLoopGuard()` before each agent run to scope detection to a single
   attempt. Tools that opt out via the `loopExempt` marker (the `notebook`, whose
   re-reads legitimately change as notes accumulate) are never guarded.
-- **`internal/diagnose`** — the core. `Diagnoser.Diagnose` maps the test, saves
-  the full failure log under `<workspace>/.testdiag/logs/` (so the jailed tools
-  can read it), starts a fresh per-test notebook under `.testdiag/notes/` and
-  points the `notebook` tool at it, builds a **fresh agent per test** (memory
-  disabled, reasoning loop enabled, capped at `maxToolIterations`), and runs it.
-  Disk is the only working memory carried across the agent's tool loop. `prompt.go` holds
-  the system prompt and assembles the first user message with a head+tail log
-  excerpt (full log reachable via the tools).
+- **`internal/diagnose`** — the DEEPINSPECT engine. `Diagnoser.Diagnose(ctx,
+  test, logRel, brief)` maps the test, starts a fresh per-test notebook under
+  `.testdiag/notes/` and points the `notebook` tool at it, **hard-disables the
+  log tools** for the run, builds a **fresh agent per test** (memory disabled,
+  reasoning loop enabled, capped at `maxToolIterations`), and runs it. It is
+  seeded with the LOGPARSE **brief**, not the raw log (`logRel` is carried only
+  into the report metadata). Disk is the only working memory carried across the
+  agent's tool loop. `prompt.go` holds the system prompt and assembles the first
+  user message from the brief. The agent is built with **no builder preset**:
+  internal tools attach via `Tools.Enabled` alone, and the `ChatAgent` preset
+  would clobber the system prompt / temperature and re-enable memory after
+  `WithConfig` (same for the LOGPARSE agent).
 - **`internal/mapping`** — **STUB.** `MapTestToSource` returns an empty path; the
   agent then finds the file itself via `list_directory`/`grep`. This is the one
   intentional placeholder — implementing the project-specific test→source mapping

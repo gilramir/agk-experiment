@@ -2,6 +2,11 @@
 #
 # Copy to ~/.config/testdiag/config.toml and edit. Every value can also be set
 # (or overridden) with an environment variable — handy for secrets in CI.
+#
+# The workflow is a state machine of stages: DOWNLOAD → LOGPARSE → DEEPINSPECT.
+# You define LLMs once under [llms.<name>] and point each stage at one by name
+# under [stages], so a cheap model can summarize the log while a stronger model
+# does the deep source tracing.
 
 [jenkins]
 # Jenkins uses HTTP Basic auth with your username + a personal API token
@@ -10,27 +15,53 @@
 user      = "your-jenkins-username"
 api_token = "your-jenkins-api-token"
 
-[llm]
-# Any OpenAI-API-compatible endpoint, including a local server.
-#   env: TESTDIAG_LLM_PROVIDER, TESTDIAG_LLM_BASE_URL, TESTDIAG_LLM_MODEL,
-#        TESTDIAG_LLM_API_KEY, TESTDIAG_LLM_TEMPERATURE, TESTDIAG_LLM_MAX_TOKENS
-provider    = "openai"
-base_url    = "http://localhost:1234/v1"
-model       = "your-local-model"
-api_key     = ""              # often unused by local servers
-temperature = 0.0
-max_tokens  = 4096
+# ---------------------------------------------------------------------------
+# Named LLMs. Define as many as you like; each is any OpenAI-API-compatible
+# endpoint (including a local server). Per-LLM secrets/overrides come from
+#   TESTDIAG_LLM_<NAME>_API_KEY / _BASE_URL / _MODEL
+# where <NAME> is the table name upper-cased (e.g. [llms.fast] -> ..._FAST_...).
+# ---------------------------------------------------------------------------
 
-# Tool-call protocol normalization. Different open models (GPT-OSS, Gemma,
-# Mistral/devmistral, Nemotron, Llama 3.x) emit tool calls in their own native syntax,
-# which AgenticGoKit's text parser doesn't recognize. With this on, requests go
-# through an in-process proxy that rewrites those into the form the agent
-# parses, and advertises the workspace tools to the model. Leave on unless your
-# model already emits a recognized format (then set normalize_tool_calls=false),
-# or your server rejects requests carrying a tools array (set inject_tools=false).
-#   env: TESTDIAG_LLM_NORMALIZE_TOOL_CALLS, TESTDIAG_LLM_INJECT_TOOLS
+[llms.fast]
+# A cheaper/faster model: good enough to read the log and write the brief.
+provider       = "openai"
+base_url       = "http://localhost:1234/v1"
+model          = "your-fast-model"
+api_key        = ""            # often unused by local servers
+context_window = 32768         # tokens; used to size how much log LOGPARSE inlines
+temperature    = 0.0
+max_tokens     = 4096
+
+[llms.deep]
+# A stronger model: traces the source to find the root cause.
+provider       = "openai"
+base_url       = "http://localhost:5678/v1"
+model          = "your-strong-model"
+api_key        = ""
+context_window = 131072
+temperature    = 0.0
+max_tokens     = 4096
+
+[stages]
+# Assign an LLM (by name above) to each stage. Both are required.
+logparse    = "fast"   # reads the raw log, emits the investigation brief
+deepinspect = "deep"   # gets ONLY the brief (not the raw log) + source tools
+
+[proxy]
+# Tool-call protocol normalization, applied to every stage's endpoint. Different
+# open models (GPT-OSS, Gemma, Mistral, Nemotron, Llama 3.x) emit tool calls in
+# their own native syntax, which AgenticGoKit's text parser doesn't recognize.
+# With this on, requests go through an in-process proxy that rewrites those into
+# the form the agent parses, and advertises the workspace tools to the model.
+# Leave on unless your model already emits a recognized format
+# (normalize_tool_calls=false), or your server rejects a tools array
+# (inject_tools=false). DEEPINSPECT is only ever advertised the SOURCE tools;
+# the raw-log tools are withheld so it works from the brief.
+#   env: TESTDIAG_PROXY_NORMALIZE_TOOL_CALLS, TESTDIAG_PROXY_INJECT_TOOLS,
+#        TESTDIAG_PROXY_DEBUG
 normalize_tool_calls = true
 inject_tools         = true
+debug                = false   # also toggled by the --debug CLI flag
 
 [workspace]
 # The local checkout the Jenkins build ran against. TEST_AGENT.md is read from
@@ -45,7 +76,8 @@ dir = "test-diagnosis"   # one Markdown report per failed test is written here
 # Failed tests are diagnosed one at a time, in order.
 
 [diagnosis]
+# Tunes the DEEPINSPECT agent loop.
 #   env: TESTDIAG_MAX_ATTEMPTS, TESTDIAG_MAX_TOOL_ITERATIONS
 max_attempts        = 3    # agent runs per test; >1 enables the critique/revise loop (1 disables it)
 max_tool_iterations = 50   # tool calls allowed within one attempt
-# Worst-case LLM round-trips per test = max_attempts * max_tool_iterations.
+# Worst-case LLM round-trips per test (DEEPINSPECT) = max_attempts * max_tool_iterations.

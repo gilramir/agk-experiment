@@ -118,6 +118,34 @@ func TestReadLogTail(t *testing.T) {
 	}
 }
 
+func TestLogToolsGate(t *testing.T) {
+	ws, _ := setupWS(t)
+	args := map[string]interface{}{"path": ".testdiag/logs/some.log", "tail": 2}
+
+	// Disabled: read_log refuses without reading the file.
+	SetLogToolsEnabled(false)
+	defer SetLogToolsEnabled(true) // restore for other tests (gate defaults on)
+	res, err := (&readLogTool{ws: ws}).Execute(context.Background(), args)
+	if err == nil {
+		t.Fatal("expected read_log to fail when log tools disabled")
+	}
+	if res == nil || res.Success {
+		t.Fatal("expected an unsuccessful result when disabled")
+	}
+
+	gres, gerr := (&grepLogTool{ws: ws}).Execute(context.Background(),
+		map[string]interface{}{"path": ".testdiag/logs/some.log", "pattern": "FATAL"})
+	if gerr == nil || gres.Success {
+		t.Fatal("expected grep_log to fail when log tools disabled")
+	}
+
+	// Re-enabled: read_log works again.
+	SetLogToolsEnabled(true)
+	if _, err := (&readLogTool{ws: ws}).Execute(context.Background(), args); err != nil {
+		t.Fatalf("read_log should work when re-enabled: %v", err)
+	}
+}
+
 func TestGrepLogContext(t *testing.T) {
 	ws, _ := setupWS(t)
 	tool := &grepLogTool{ws: ws}

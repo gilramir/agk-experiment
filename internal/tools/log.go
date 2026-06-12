@@ -39,6 +39,9 @@ func (t *readLogTool) JSONSchema() map[string]interface{} {
 	}
 }
 func (t *readLogTool) Execute(ctx context.Context, args map[string]interface{}) (*vnext.ToolResult, error) {
+	if !logToolsEnabled.Load() {
+		return fail("read_log: the raw failure log is not available at this stage. Work from the investigation brief you were given and trace into the actual source files instead.")
+	}
 	path, has := strArg(args, "path")
 	if !has {
 		return fail("read_log: 'path' is required")
@@ -108,6 +111,9 @@ func (t *grepLogTool) JSONSchema() map[string]interface{} {
 	}
 }
 func (t *grepLogTool) Execute(ctx context.Context, args map[string]interface{}) (*vnext.ToolResult, error) {
+	if !logToolsEnabled.Load() {
+		return fail("grep_log: the raw failure log is not available at this stage. Work from the investigation brief you were given and trace into the actual source files instead.")
+	}
 	path, has := strArg(args, "path")
 	if !has {
 		return fail("grep_log: 'path' is required")

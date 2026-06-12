@@ -62,6 +62,25 @@ var verbose atomic.Bool
 // SetVerbose enables or disables the per-tool progress logging emitted to stderr.
 func SetVerbose(v bool) { verbose.Store(v) }
 
+// logToolsEnabled gates the log-reading tools (read_log, grep_log). The
+// DEEPINSPECT stage turns it off so the agent works only from the LOGPARSE
+// investigation brief and cannot re-read the raw failure log. It is a
+// process-global for the same reason as verbose: the tools are shared, stateless
+// singletons. It defaults to enabled.
+var logToolsEnabled atomic.Bool
+
+func init() { logToolsEnabled.Store(true) }
+
+// SetLogToolsEnabled enables or disables the raw-log tools (read_log, grep_log).
+// When disabled, those tools refuse the call and tell the model to work from the
+// investigation brief instead. Set per stage before building the agent.
+func SetLogToolsEnabled(v bool) { logToolsEnabled.Store(v) }
+
+// LogToolNames lists the tools that read the raw failure log. DEEPINSPECT is
+// hard-blocked from these — they are excluded from the tool set advertised to it
+// (see Schemas/SchemasExcluding) and gated off via SetLogToolsEnabled.
+var LogToolNames = []string{"read_log", "grep_log"}
+
 // vlogf writes a tool progress line to stderr when verbose mode is on. Each call
 // is a single Fprintf, so concurrent workers interleave by whole lines.
 func vlogf(format string, args ...interface{}) {
@@ -247,10 +266,22 @@ type Schema struct {
 // uses these to inject a `tools` array into outbound requests, because
 // AgenticGoKit's OpenAI adapter does not send tool definitions itself. No path
 // is resolved here, so a nil workspace is fine.
-func Schemas() []Schema {
+func Schemas() []Schema { return SchemasExcluding() }
+
+// SchemasExcluding is Schemas without the named tools. The DEEPINSPECT stage
+// uses it to advertise the workspace tools minus the log tools (LogToolNames),
+// so the model is never even told the raw log is reachable.
+func SchemasExcluding(exclude ...string) []Schema {
+	skip := make(map[string]bool, len(exclude))
+	for _, n := range exclude {
+		skip[n] = true
+	}
 	defs := toolDefs(nil)
 	out := make([]Schema, 0, len(defs))
 	for _, d := range defs {
+		if skip[d.Name()] {
+			continue
+		}
 		ws, ok := d.(vnext.ToolWithSchema)
 		if !ok {
 			continue

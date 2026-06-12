@@ -1,6 +1,13 @@
-// Package diagnose runs a single failing test through an AgenticGoKit agent
-// that uses the provider's native tool-calling loop to read workspace files and
-// determine the root cause.
+// Package diagnose implements the DEEPINSPECT stage: it runs a single failing
+// test through an AgenticGoKit agent that uses the provider's native
+// tool-calling loop to read workspace SOURCE files and determine the root cause.
+//
+// Unlike earlier versions, the agent is NOT given the raw Jenkins log. It works
+// only from the investigation brief produced by the LOGPARSE stage (a Markdown
+// handoff naming the source/logic to find and the flakiness conditions to
+// check), and the raw-log tools are hard-disabled for the duration of the run
+// (see tools.SetLogToolsEnabled). This keeps the deep-tracing model focused on
+// code instead of re-reading noisy log output.
 package diagnose
 
 import (
@@ -20,10 +27,6 @@ import (
 	"github.com/gilbertr/testdiag/internal/tools"
 	"github.com/gilbertr/testdiag/internal/workspace"
 )
-
-// logDir is where fetched failure logs are written, relative to the workspace
-// root, so the jailed file tools can read them.
-const logDir = ".testdiag/logs"
 
 // notebookDir is where each test's investigation notebook lives, relative to the
 // workspace root, so the notebook tool (jailed like the rest) can read/write it.
@@ -48,37 +51,38 @@ func (d *Diagnoser) maxToolIterations() int {
 type Result struct {
 	Test        jenkins.FailedTest
 	Mapping     mapping.Result
-	LogPath     string   // workspace-relative path to the saved log
+	LogPath     string   // workspace-relative path to the saved log (from DOWNLOAD)
 	RootCause   string   // the agent's Markdown analysis
 	ToolsCalled []string // tools the agent invoked (for the report footer)
 	Duration    time.Duration
 }
 
-// Diagnoser diagnoses tests against a fixed workspace and LLM config.
+// Diagnoser runs the DEEPINSPECT stage against a fixed workspace using the LLM
+// assigned to that stage.
 type Diagnoser struct {
 	cfg        *config.Config
 	ws         *workspace.Workspace
+	llm        config.LLMSpec
 	background string // contents of TEST_AGENT.md
 }
 
-// New creates a Diagnoser. background is the TEST_AGENT.md content (may be "").
-func New(cfg *config.Config, ws *workspace.Workspace, background string) *Diagnoser {
-	return &Diagnoser{cfg: cfg, ws: ws, background: background}
+// New creates a Diagnoser. llm is the LLM assigned to the DEEPINSPECT stage;
+// background is the TEST_AGENT.md content (may be "").
+func New(cfg *config.Config, ws *workspace.Workspace, llm config.LLMSpec, background string) *Diagnoser {
+	return &Diagnoser{cfg: cfg, ws: ws, llm: llm, background: background}
 }
 
-// Diagnose maps the test to its source, persists its log, builds a fresh agent
-// (per-test independence), and runs the native tool-calling loop to completion.
-func (d *Diagnoser) Diagnose(ctx context.Context, test jenkins.FailedTest) (Result, error) {
+// Diagnose runs the DEEPINSPECT agent for one test. brief is the LOGPARSE
+// handoff (Markdown); logRel is the workspace-relative path of the already-saved
+// raw log, carried only into the report metadata — it is NOT given to the agent,
+// which is hard-blocked from the raw log. A fresh agent is built per test
+// (per-test independence), then the native tool-calling loop runs to completion.
+func (d *Diagnoser) Diagnose(ctx context.Context, test jenkins.FailedTest, logRel, brief string) (Result, error) {
 	start := time.Now()
 
 	m, err := mapping.MapTestToSource(d.ws.Root(), test)
 	if err != nil {
 		return Result{}, fmt.Errorf("mapping %s: %w", test.FullName(), err)
-	}
-
-	logRel, err := d.saveLog(test)
-	if err != nil {
-		return Result{}, fmt.Errorf("saving log for %s: %w", test.FullName(), err)
 	}
 
 	// Give the agent a fresh per-test notebook to record what it's looking for
@@ -87,13 +91,19 @@ func (d *Diagnoser) Diagnose(ctx context.Context, test jenkins.FailedTest) (Resu
 		return Result{}, fmt.Errorf("preparing notebook for %s: %w", test.FullName(), err)
 	}
 
+	// Hard-block the raw failure log: DEEPINSPECT works only from the brief. The
+	// log tools are also withheld from the advertised tool set (see main), so this
+	// only fires if a model emits a log call unprompted. Re-enable on the way out
+	// so other stages/tests are unaffected.
+	tools.SetLogToolsEnabled(false)
+	defer tools.SetLogToolsEnabled(true)
+
 	agent, err := d.buildAgent(test)
 	if err != nil {
 		return Result{}, fmt.Errorf("building agent for %s: %w", test.FullName(), err)
 	}
 
-	excerpt := makeExcerpt(combinedLog(test))
-	basePrompt := buildUserPrompt(test, m, logRel, excerpt, d.background)
+	basePrompt := buildUserPrompt(test, m, brief, d.background)
 
 	// Critique/revise loop: run the agent, and if the draft looks shallow (didn't
 	// open source, or never names a flakiness mechanism) re-run it with the gaps
@@ -120,7 +130,7 @@ func (d *Diagnoser) Diagnose(ctx context.Context, test jenkins.FailedTest) (Resu
 		res = r
 		toolsCalled = append(toolsCalled, r.ToolsCalled...)
 
-		issues := critique(r, logRel)
+		issues := critique(r)
 		if len(issues) == 0 || attempt == attempts {
 			break
 		}
@@ -147,15 +157,15 @@ const minToolCalls = 3
 // It is a cheap, conservative gate for the revise loop: it only flags answers
 // that clearly didn't do the work, so a genuinely thorough first attempt is
 // accepted without a second (costly) run.
-func critique(res *vnext.Result, logPath string) []string {
+func critique(res *vnext.Result) []string {
 	var issues []string
 
-	// Did the agent explore source beyond the saved failure log? ToolCalls
-	// carries the arguments; fall back to ToolsCalled (names only) if it's empty.
+	// Did the agent actually open any source files? ToolCalls carries the
+	// arguments; fall back to ToolsCalled (names only) if it's empty.
 	total := len(res.ToolCalls)
 	sourceReads := 0
 	for _, c := range res.ToolCalls {
-		if p := toolArgPath(c.Arguments); p != "" && p != logPath {
+		if p := toolArgPath(c.Arguments); p != "" {
 			sourceReads++
 		}
 	}
@@ -166,7 +176,7 @@ func critique(res *vnext.Result, logPath string) []string {
 		issues = append(issues, fmt.Sprintf("only %d tool call(s) were made — the system was barely explored", total))
 	}
 	if len(res.ToolCalls) > 0 && sourceReads == 0 {
-		issues = append(issues, "no source files were opened (only the failure log was read) — read the actual client and server code")
+		issues = append(issues, "no source files were opened — read the actual client and server code named in the brief")
 	}
 
 	content := strings.ToLower(res.Content)
@@ -233,6 +243,11 @@ func toolArgPath(args map[string]interface{}) string {
 // buildAgent constructs a fresh agent for one test. Memory is disabled so each
 // diagnosis is fully independent; reasoning is enabled so the agent loops:
 // call LLM -> execute tools -> feed results back -> repeat.
+//
+// We deliberately do NOT apply a builder preset: the registered internal tools
+// attach via Tools.Enabled alone (createTools -> DiscoverInternalTools), and the
+// ChatAgent preset would clobber our SystemPrompt/Temperature/MaxTokens and
+// re-enable memory after WithConfig.
 func (d *Diagnoser) buildAgent(test jenkins.FailedTest) (vnext.Agent, error) {
 	name := "diagnose-" + sanitize(test.FullName())
 	return vnext.NewBuilder(name).
@@ -240,12 +255,12 @@ func (d *Diagnoser) buildAgent(test jenkins.FailedTest) (vnext.Agent, error) {
 			Name:         name,
 			SystemPrompt: systemPrompt,
 			LLM: vnext.LLMConfig{
-				Provider:    d.cfg.LLM.Provider,
-				Model:       d.cfg.LLM.Model,
-				BaseURL:     d.cfg.LLM.BaseURL,
-				APIKey:      d.cfg.LLM.APIKey,
-				Temperature: d.cfg.LLM.Temperature,
-				MaxTokens:   d.cfg.LLM.MaxTokens,
+				Provider:    d.llm.Provider,
+				Model:       d.llm.Model,
+				BaseURL:     d.llm.BaseURL,
+				APIKey:      d.llm.APIKey,
+				Temperature: d.llm.Temperature,
+				MaxTokens:   d.llm.MaxTokens,
 			},
 			Tools: &vnext.ToolsConfig{
 				Enabled: true,
@@ -258,23 +273,7 @@ func (d *Diagnoser) buildAgent(test jenkins.FailedTest) (vnext.Agent, error) {
 			Memory:  &vnext.MemoryConfig{Enabled: false},
 			Timeout: 10 * time.Minute,
 		}).
-		WithPreset(vnext.ChatAgent). // makes the registered internal tools available
 		Build()
-}
-
-// saveLog writes the test's combined output under <root>/.testdiag/logs and
-// returns the workspace-relative path (so the jailed tools can open it).
-func (d *Diagnoser) saveLog(test jenkins.FailedTest) (string, error) {
-	dir := filepath.Join(d.ws.Root(), logDir)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return "", err
-	}
-	rel := filepath.Join(logDir, sanitize(test.FullName())+".log")
-	abs := filepath.Join(d.ws.Root(), rel)
-	if err := os.WriteFile(abs, []byte(combinedLog(test)), 0o644); err != nil {
-		return "", err
-	}
-	return filepath.ToSlash(rel), nil
 }
 
 // prepareNotebook starts a fresh investigation notebook for the test (replacing
@@ -294,26 +293,6 @@ func (d *Diagnoser) prepareNotebook(test jenkins.FailedTest) (string, error) {
 	relSlash := filepath.ToSlash(rel)
 	tools.SetNotebookPath(relSlash)
 	return relSlash, nil
-}
-
-// combinedLog assembles the full failure output the way a developer would see
-// it: error summary, stack trace, then captured stdout/stderr.
-func combinedLog(test jenkins.FailedTest) string {
-	var b strings.Builder
-	section := func(title, body string) {
-		if strings.TrimSpace(body) == "" {
-			return
-		}
-		fmt.Fprintf(&b, "===== %s =====\n%s\n\n", title, strings.TrimRight(body, "\n"))
-	}
-	section("ERROR DETAILS", test.ErrorDetails)
-	section("STACK TRACE", test.ErrorStackTrace)
-	section("STDOUT", test.Stdout)
-	section("STDERR", test.Stderr)
-	if b.Len() == 0 {
-		return "(no failure output was provided by Jenkins for this test)\n"
-	}
-	return b.String()
 }
 
 // sanitize makes a test name safe to use as a single filename segment.

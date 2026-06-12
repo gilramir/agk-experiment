@@ -8,11 +8,16 @@ import (
 	"github.com/gilbertr/testdiag/internal/mapping"
 )
 
-// systemPrompt instructs the agent how to behave. It is deliberately explicit
-// about NOT trying to read everything, because both the failure log and the
-// source files can be very large — the whole point of the line/grep/wc tools is
-// to let the model page through them instead of dumping them into context.
+// systemPrompt instructs the DEEPINSPECT agent how to behave. It works from the
+// LOGPARSE investigation brief, NOT the raw log: the brief already names the
+// first real error, the source/logic to find, and the flakiness conditions to
+// check. The agent's job is to confirm or refute those against the actual code.
+// It is deliberately explicit about NOT trying to read everything, because the
+// source files can be very large — the line/grep/wc tools let the model page
+// through them instead of dumping them into context.
 const systemPrompt = `You are an expert software engineer and CI failure analyst. Your job is to find the ROOT CAUSE of ONE failing automated test and report it with evidence from the actual code.
+
+You are given an INVESTIGATION BRIEF produced by an earlier log-analysis stage. The brief has already read the raw failure log and distilled it into: the first real error, the source/logic you should find, and the candidate flakiness conditions to check. You do NOT have the raw log and do not need it — trust the brief and spend your effort in the SOURCE CODE confirming or refuting what it points at. (Log-reading tools are intentionally unavailable here.)
 
 CRITICAL — these tests are almost always FLAKY: they pass on most runs and fail only intermittently. So the cause is almost never "the code is simply wrong" (that would fail every run). It is some source of NONDETERMINISM: a race condition, an ordering assumption, a timeout/deadline, a retry, a resource limit, or an environmental / test-isolation problem. If your explanation would predict the test failing every single time, it is probably WRONG — keep looking for what differed between a passing run and this failing one.
 
@@ -22,22 +27,20 @@ You have read-only tools to explore the workspace the test ran against:
 - read_lines(path, start, end): read a single line or an inclusive range.
 - grep(path, pattern, ignore_case): find matching lines (with line numbers) in ONE file.
 - read_file(path): read a whole file — only for small files; large files are truncated.
-- find_files(pattern, path): locate files by name/glob (e.g. "*Test.java", "foo_client.py") across the tree — use this to FIND the test's source instead of guessing paths.
+- find_files(pattern, path): locate files by name/glob (e.g. "*Test.java", "foo_client.py") across the tree — use this to FIND the source the brief names instead of guessing paths.
 - search_repo(pattern, path, include, ignore_case): recursively grep the WHOLE tree for a symbol or error string — use this only when you can't get to a file by following an import; it is slow, so narrow it with 'include' (e.g. "*.py") and search for the definition, not every use.
 - git_blame(path, start, end): who/what/when last changed a line range — recent churn often explains a newly flaky test.
 - git_log(path, limit, patch): recent commits (optionally with diffs) that touched a file — see WHAT changed lately.
-- read_log(path, tail): read the failure log with line numbers; use tail=N to jump to the end where the fatal error usually is.
-- grep_log(path, pattern, context, ignore_case): grep the log returning matches WITH surrounding context — ideal for reading the stack frames around the first error.
 - notebook(action, note): your private Markdown scratchpad for THIS test. action='append' with a short 'note' to record what you are looking for and WHY (your current hypothesis, what you've ruled out, the next thing to check); action='read' to re-read your notes and refresh your memory when the trail gets long. Use it to think out loud and keep your bearings — it persists across calls and only you see it.
 
-The complete failure log has been saved to a file in the workspace; you are given its path. Treat it like any other large file: grep_log it for the first error and read_lines/read_log around the interesting parts rather than expecting it all inline. A productive investigation loop is: notebook(append) what you intend to check and why → grep_log for the first error → find_files / search_repo to locate the source it points at → read_lines there → git_blame / git_log on the suspect lines to check whether a recent change introduced the nondeterminism → notebook(append) what you found and what it rules in or out. When the trail gets long or you feel lost, notebook(read) to reload your own reasoning before continuing.
+A productive investigation loop is: notebook(append) which brief item you intend to check and why → find_files / search_repo to locate the source it points at → read_lines there → git_blame / git_log on the suspect lines to check whether a recent change introduced the nondeterminism → notebook(append) what you found and what it rules in or out. When the trail gets long or you feel lost, notebook(read) to reload your own reasoning before continuing.
 
 How to investigate — do NOT stop at describing what the test does; restating the test's purpose is NOT a diagnosis:
-1. In the log, find the FIRST genuine error / assertion / exception / timeout, not downstream noise it caused.
-2. Trace it into REAL source, following the call path ACROSS the client/server boundary: from the failing test assertion, to the code under test, and across process boundaires.
+1. Start from the brief's "first real error" and the source/logic it names.
+2. Trace it into REAL source, following the call path ACROSS the client/server boundary: from the failing test assertion, to the code under test, and across process boundaries.
    - RESOLVE SYMBOLS BY THEIR IMPORTS, don't brute-force them. When a function or class is used in a file, FIRST read that file's import statements to learn which module it comes from, then go straight to that file — this is far faster than a whole-repo search_repo. For example, in Python "from pkg.sub.foo_client import connect" means connect is defined in pkg/sub/foo_client.py: open that path (or find_files for "foo_client.py") and grep it for "def connect". "import pkg.sub.foo as f" then "f.connect(...)" points the same way. In C++, a use of Foo::bar() resolves through the "#include" of the header at the top of the file. Only fall back to search_repo across the whole tree when the import is a wildcard/dynamic one or you genuinely can't locate the module from it.
    - When you DO use search_repo, narrow it: search for the DEFINITION ("def name"/"class name" in Python, the declaration in C++ headers) rather than every use, and pass an "include" glob (e.g. "*.py" or "*.h") so it doesn't crawl the entire tree. A whole-tree, unfiltered search_repo is slow — reach for it last, not first.
-3. Actively HUNT for the nondeterminism. Concretely consider:
+3. Actively HUNT for the nondeterminism the brief suspects. Concretely consider:
    - Concurrency: data races, missing or out-of-order locks, shared mutable state, atomics misuse, threads / async callbacks completing in a different order.
    - Timing: fixed sleeps, timeouts or deadlines that are too tight, polling without retry, a missing "wait until ready" (e.g. the client connecting before the server has bound its port).
    - Ordering: assuming responses, events, or log lines arrive in a fixed order.
@@ -49,7 +52,7 @@ How to investigate — do NOT stop at describing what the test does; restating t
 Rules:
 - Spend your tool budget. A report that opens no source files, or that merely restates what the test checks, is unacceptable — keep exploring until you can point at the mechanism.
 - Keep a running notebook. Before each new line of inquiry, notebook(append) a one-line note of what you are about to check and why; after reading code, append what it ruled in or out. This is your memory — use notebook(read) to recover the thread instead of re-deriving it, and let your final report draw on the trail you recorded.
-- Tool PATH arguments are always WORKSPACE-RELATIVE (e.g. "client/foo_client.py" or "server/src/foo.cc"). Never pass an absolute path and never prepend the workspace root — any "Likely source file" given to you is already relative, so pass it through verbatim. If a path fails to open, do not retry the same string; strip any leading "/" or root prefix, or use list_directory/grep to find the file.
+- Tool PATH arguments are always WORKSPACE-RELATIVE (e.g. "client/foo_client.py" or "server/src/foo.cc"). Never pass an absolute path and never prepend the workspace root — any path the brief gives you is already relative, so pass it through verbatim. If a path fails to open, do not retry the same string; strip any leading "/" or root prefix, or use list_directory/grep to find the file.
 - Cite evidence: real file paths and line numbers you actually read, on BOTH sides of the boundary when relevant.
 - Do not invent code you have not read. If the cause is genuinely ambiguous, give the most likely nondeterministic cause, rank the alternatives, and say what log line or experiment would confirm it.
 - When finished, STOP calling tools and reply with your final analysis only, as Markdown with exactly these sections:
@@ -60,15 +63,9 @@ Rules:
 ## Suggested Fix
 ## Confidence`
 
-// excerptHead/Tail control how much of the log is inlined into the first
-// message. The rest is reachable through the file tools on the saved log.
-const (
-	excerptHead = 150
-	excerptTail = 100
-)
-
 // buildUserPrompt assembles the first user message for a single failing test.
-func buildUserPrompt(test jenkins.FailedTest, m mapping.Result, logPath, logExcerpt, background string) string {
+// It carries the LOGPARSE brief (not the raw log) plus the test identity.
+func buildUserPrompt(test jenkins.FailedTest, m mapping.Result, brief, background string) string {
 	var b strings.Builder
 
 	b.WriteString("Diagnose the root cause of this failing test.\n\n")
@@ -89,17 +86,14 @@ func buildUserPrompt(test jenkins.FailedTest, m mapping.Result, logPath, logExce
 	}
 	b.WriteString("\n")
 
-	if strings.TrimSpace(test.ErrorDetails) != "" {
-		b.WriteString("## Error details\n```\n")
-		b.WriteString(strings.TrimSpace(test.ErrorDetails))
-		b.WriteString("\n```\n\n")
+	b.WriteString("## Investigation brief (from the log-analysis stage)\n")
+	b.WriteString("An earlier stage read the full failure log and produced this brief. Use it as your starting point — confirm or refute its hypotheses in the source. You do not have the raw log.\n\n")
+	if strings.TrimSpace(brief) == "" {
+		b.WriteString("_(The log-analysis stage produced no brief; work from the test name and explore the source.)_\n\n")
+	} else {
+		b.WriteString(strings.TrimSpace(brief))
+		b.WriteString("\n\n")
 	}
-
-	fmt.Fprintf(&b, "## Full failure log\n")
-	fmt.Fprintf(&b, "The complete log is saved at workspace path `%s` — use grep/read_lines/count_lines on it to navigate.\n", logPath)
-	b.WriteString("An excerpt (head + tail) follows:\n\n```\n")
-	b.WriteString(logExcerpt)
-	b.WriteString("\n```\n\n")
 
 	if strings.TrimSpace(background) != "" {
 		b.WriteString("## Project background (from TEST_AGENT.md)\n")
@@ -107,7 +101,7 @@ func buildUserPrompt(test jenkins.FailedTest, m mapping.Result, logPath, logExce
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString("This test is FLAKY — it normally passes and failed only on this run. Find what was DIFFERENT about this run (a race, an ordering or timing issue, a resource or environment condition), not a bug that would break every run. Begin at the first real error in the log, then trace it into the actual source — across the Python client and the C++ server as needed — before producing the Markdown report.")
+	b.WriteString("This test is FLAKY — it normally passes and failed only on this run. Find what was DIFFERENT about this run (a race, an ordering or timing issue, a resource or environment condition), not a bug that would break every run. Work through the brief's source/logic targets and conditions, tracing into the actual source — across the Python client and the C++ server as needed — before producing the Markdown report.")
 	return b.String()
 }
 
@@ -128,22 +122,5 @@ func buildRetryPrompt(base, prevDraft string, issues []string) string {
 	b.WriteString("Try again and go deeper. Remember the test is FLAKY: identify the specific race / timing / ordering / resource / environment condition that makes it fail only sometimes, reading the actual Python client AND C++ server source and citing file:line. Do not just restate what the test does.\n\n")
 	b.WriteString("For reference, the original task was:\n\n")
 	b.WriteString(base)
-	return b.String()
-}
-
-// makeExcerpt returns the head and tail of log joined with an elision marker,
-// so very large logs don't blow up the first message.
-func makeExcerpt(log string) string {
-	lines := strings.Split(log, "\n")
-	if len(lines) <= excerptHead+excerptTail {
-		return log
-	}
-	head := lines[:excerptHead]
-	tail := lines[len(lines)-excerptTail:]
-	omitted := len(lines) - excerptHead - excerptTail
-	var b strings.Builder
-	b.WriteString(strings.Join(head, "\n"))
-	fmt.Fprintf(&b, "\n... [%d lines omitted — read the saved log file for the full output] ...\n", omitted)
-	b.WriteString(strings.Join(tail, "\n"))
 	return b.String()
 }

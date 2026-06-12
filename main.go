@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 
@@ -25,9 +26,9 @@ import (
 	_ "github.com/agenticgokit/agenticgokit/plugins/llm/openai"
 
 	"github.com/gilbertr/testdiag/internal/config"
-	"github.com/gilbertr/testdiag/internal/diagnose"
 	"github.com/gilbertr/testdiag/internal/jenkins"
 	"github.com/gilbertr/testdiag/internal/llmproxy"
+	"github.com/gilbertr/testdiag/internal/pipeline"
 	"github.com/gilbertr/testdiag/internal/report"
 	"github.com/gilbertr/testdiag/internal/tools"
 	"github.com/gilbertr/testdiag/internal/workspace"
@@ -101,7 +102,7 @@ func run() error {
 		cfg.Output.Dir = opts.Output
 	}
 	if opts.Debug {
-		cfg.LLM.Debug = true
+		cfg.Proxy.Debug = true
 	}
 
 	ws, err := workspace.New(cfg.Workspace.Root)
@@ -118,36 +119,38 @@ func run() error {
 	tools.ExcludeDir(filepath.Base(cfg.Output.Dir))
 	toolNames := tools.Register(ws)
 
-	// Front the LLM endpoint with the in-process proxy so models with differing
-	// native tool-call syntaxes (GPT-OSS, Gemma, Mistral, Nemotron) all work, and
-	// so the full conversation can be logged when debugging. This rewrites
-	// cfg.LLM.BaseURL to the local proxy. Debug needs the proxy too, so start it
-	// whenever either is requested.
-	if cfg.LLM.NormalizeToolCalls || cfg.LLM.Debug || opts.Verbose {
-		var proxyTools []llmproxy.Tool
-		if cfg.LLM.NormalizeToolCalls && cfg.LLM.InjectTools {
-			for _, s := range tools.Schemas() {
-				proxyTools = append(proxyTools, llmproxy.Tool{
-					Name:        s.Name,
-					Description: s.Description,
-					Parameters:  s.Parameters,
-				})
-			}
+	// Resolve the LLM assigned to each stage. DEEPINSPECT gets the workspace
+	// source tools; LOGPARSE is a single tool-less pass over the log.
+	logparseLLM, err := cfg.LLMForStage(config.StageLogParse)
+	if err != nil {
+		return err
+	}
+	deepinspectLLM, err := cfg.LLMForStage(config.StageDeepInspect)
+	if err != nil {
+		return err
+	}
+
+	// Front each stage's endpoint with the in-process proxy so models with
+	// differing native tool-call syntaxes (GPT-OSS, Gemma, Mistral, Nemotron) all
+	// work, and so the full conversation can be logged when debugging. This
+	// rewrites each LLM's BaseURL to a local proxy. DEEPINSPECT advertises the
+	// source tools (the log tools are withheld so the model can't re-read the raw
+	// log); LOGPARSE advertises none. Debug/verbose need the proxy too.
+	pm := newProxyManager(cfg.Proxy, opts.Verbose)
+	defer pm.Close()
+	if pm.enabled() {
+		var deepTools []llmproxy.Tool
+		if cfg.Proxy.InjectTools {
+			deepTools = toProxyTools(tools.SchemasExcluding(tools.LogToolNames...))
 		}
-		px, err := llmproxy.Start(cfg.LLM.BaseURL, llmproxy.Options{
-			Tools:     proxyTools,
-			Normalize: cfg.LLM.NormalizeToolCalls,
-			Debug:     cfg.LLM.Debug,
-			Verbose:   opts.Verbose,
-		})
-		if err != nil {
-			return fmt.Errorf("starting LLM proxy: %w", err)
+		if deepinspectLLM, err = pm.front("deepinspect", deepinspectLLM, deepTools); err != nil {
+			return err
 		}
-		defer px.Close()
-		fmt.Printf("LLM proxy active: %s -> %s (normalize=%t, inject_tools=%t, debug=%t)\n",
-			px.BaseURL(), cfg.LLM.BaseURL,
-			cfg.LLM.NormalizeToolCalls, cfg.LLM.InjectTools, cfg.LLM.Debug)
-		cfg.LLM.BaseURL = px.BaseURL()
+		// LOGPARSE never gets a tools array: it is a single pass that must not
+		// emit tool calls.
+		if logparseLLM, err = pm.front("logparse", logparseLLM, nil); err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -171,26 +174,28 @@ func run() error {
 		}
 	}
 
+	pl := pipeline.New(cfg, ws, logparseLLM, deepinspectLLM, background)
+
 	fmt.Printf("Found %d failed test(s). Workspace: %s\n", len(failures), ws.Root())
-	fmt.Printf("LLM: %s @ %s (model %s). Tools: %v\n",
-		cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, toolNames)
+	fmt.Printf("Pipeline: %v\n", pl.States())
+	fmt.Printf("  LOGPARSE    -> %s (model %s)\n", logparseLLM.BaseURL, logparseLLM.Model)
+	fmt.Printf("  DEEPINSPECT -> %s (model %s). Tools: %v\n", deepinspectLLM.BaseURL, deepinspectLLM.Model, toolNames)
 	fmt.Printf("Diagnosing one at a time; reports -> %s\n\n", cfg.Output.Dir)
 
-	d := diagnose.New(cfg, ws, background)
-	return process(ctx, d, failures, cfg.Output)
+	return process(ctx, pl, failures, cfg.Output)
 }
 
 // process diagnoses failures one at a time, in order. Each test is independent,
 // but running them sequentially keeps the output (and the run_script approval
 // prompts) coherent for the operator rather than interleaving many at once.
-func process(ctx context.Context, d *diagnose.Diagnoser, failures []jenkins.FailedTest, out config.Output) error {
+func process(ctx context.Context, pl *pipeline.Pipeline, failures []jenkins.FailedTest, out config.Output) error {
 	var failed, analyzed int
 
 	for _, test := range failures {
 		if ctx.Err() != nil {
 			break
 		}
-		res, err := d.Diagnose(ctx, test)
+		res, err := pl.Run(ctx, test)
 		if err != nil {
 			failed++
 			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", test.FullName(), err)
@@ -211,6 +216,81 @@ func process(ctx context.Context, d *diagnose.Diagnoser, failures []jenkins.Fail
 		return fmt.Errorf("%d test(s) could not be diagnosed", failed)
 	}
 	return nil
+}
+
+// proxyManager starts at most one normalizing LLM proxy per distinct
+// (endpoint, advertised tool set) and rewrites each stage LLM's BaseURL to its
+// proxy. Two stages that share both an endpoint and a tool set share one proxy;
+// the same endpoint advertised with different tools (LOGPARSE: none,
+// DEEPINSPECT: source tools) gets a proxy each.
+type proxyManager struct {
+	cfg     config.Proxy
+	verbose bool
+	byKey   map[string]*llmproxy.Proxy
+	proxies []*llmproxy.Proxy
+}
+
+func newProxyManager(cfg config.Proxy, verbose bool) *proxyManager {
+	return &proxyManager{cfg: cfg, verbose: verbose, byKey: map[string]*llmproxy.Proxy{}}
+}
+
+// enabled reports whether any proxy is needed at all. With everything off the
+// stages talk to their real endpoints directly.
+func (m *proxyManager) enabled() bool {
+	return m.cfg.NormalizeToolCalls || m.cfg.Debug || m.verbose
+}
+
+// front ensures a proxy exists for spec's endpoint advertising proxyTools, then
+// returns spec with its BaseURL repointed at that proxy. stage labels the
+// startup log line.
+func (m *proxyManager) front(stage string, spec config.LLMSpec, proxyTools []llmproxy.Tool) (config.LLMSpec, error) {
+	key := spec.BaseURL + "\x00" + toolSig(proxyTools)
+	px, ok := m.byKey[key]
+	if !ok {
+		p, err := llmproxy.Start(spec.BaseURL, llmproxy.Options{
+			Tools:     proxyTools,
+			Normalize: m.cfg.NormalizeToolCalls,
+			Debug:     m.cfg.Debug,
+			Verbose:   m.verbose,
+		})
+		if err != nil {
+			return spec, fmt.Errorf("starting LLM proxy for %s: %w", stage, err)
+		}
+		m.byKey[key] = p
+		m.proxies = append(m.proxies, p)
+		px = p
+		fmt.Printf("LLM proxy active: %s -> %s (normalize=%t, tools=%d, debug=%t)\n",
+			px.BaseURL(), spec.BaseURL, m.cfg.NormalizeToolCalls, len(proxyTools), m.cfg.Debug)
+	}
+	spec.BaseURL = px.BaseURL()
+	return spec, nil
+}
+
+// Close shuts down every started proxy.
+func (m *proxyManager) Close() {
+	for _, p := range m.proxies {
+		p.Close()
+	}
+}
+
+// toolSig is a stable signature of an advertised tool set so two stages with the
+// same endpoint and tools reuse one proxy.
+func toolSig(ts []llmproxy.Tool) string {
+	names := make([]string, 0, len(ts))
+	for _, t := range ts {
+		names = append(names, t.Name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ",")
+}
+
+// toProxyTools adapts workspace tool schemas to the proxy's Tool shape.
+func toProxyTools(schemas []tools.Schema) []llmproxy.Tool {
+	out := make([]llmproxy.Tool, 0, len(schemas))
+	for _, s := range schemas {
+		out = append(out, llmproxy.Tool{Name: s.Name, Description: s.Description, Parameters: s.Parameters})
+	}
+	return out
 }
 
 // filterTests keeps only tests whose full name contains at least one of the

@@ -16,17 +16,24 @@ Given a Jenkins build URL:
    your Jenkins user + API token).
 2. Parses the JSON to find every **failed** test case (with its stack trace and
    captured stdout/stderr).
-3. For each failure, **one at a time, in order**:
-   - Maps the test to its source file (project-specific — **stubbed**).
-   - Saves the full failure log into the workspace so the file tools can read it.
-   - Starts a fresh per-test notebook (the agent's scratchpad) under
-     `.testdiag/notes/`.
-   - Builds a fresh AgenticGoKit agent (memory disabled) and runs the
-     **provider's native tool-calling loop**: the LLM reads the log, then
-     navigates the source with the tools below until it can explain the failure.
+3. For each failure, **one at a time, in order**, it runs a small state machine
+   of stages, each handing off to the next through a Markdown file on disk:
+   - **DOWNLOAD** — saves the test's full failure log under `.testdiag/logs/`.
+   - **LOGPARSE** — one tool-less LLM pass over that log produces an
+     **investigation brief** (`.testdiag/handoff/<test>.logparse.md`): the first
+     real error, the source/logic to find, and the candidate flakiness
+     conditions to check.
+   - **DEEPINSPECT** — a fresh agent that gets **only the brief** (not the raw
+     log) plus the workspace **source** tools, traces into the actual code, and
+     produces the root-cause report. The raw-log tools are withheld from it.
 4. Writes one Markdown root-cause report per test under `test-diagnosis/`.
 
-Each test is diagnosed independently — its own agent, no shared memory. They are
+You can assign a **different LLM to LOGPARSE and DEEPINSPECT** (see
+[Setup](#setup)): a cheap model can read the noisy log and write the brief while
+a stronger model does the deep source tracing. Splitting the work, and keeping
+the raw log out of DEEPINSPECT, is what keeps each model focused.
+
+Each test is diagnosed independently — its own agents, no shared memory. They are
 run sequentially (rather than in a worker pool) so the output, and especially the
 `run_script` approval prompts, stay coherent for the operator instead of
 interleaving many tests at once.
@@ -51,10 +58,14 @@ the context window.
 | `find_files` | Locate files by glob / substring |
 | `git_blame` | Blame a jailed path |
 | `git_log` | History for a jailed path (pager off, byte-capped) |
-| `read_log` | Read the saved failure log (with `tail`) |
-| `grep_log` | Search the failure log (with context lines) |
+| `read_log` | Read the saved failure log (with `tail`) — **withheld from DEEPINSPECT** |
+| `grep_log` | Search the failure log (with context lines) — **withheld from DEEPINSPECT** |
 | `run_script` | Write + run a shell/Python script — **only after operator approval** |
 | `notebook` | Per-test Markdown scratchpad (`append` / `read`) the agent uses as working memory |
+
+The two log tools are not advertised to DEEPINSPECT, and are hard-disabled while
+it runs (`tools.SetLogToolsEnabled`), so it cannot re-read the raw log — it works
+from the LOGPARSE brief. LOGPARSE itself uses no tools (the log is given inline).
 
 The prompt steers the model to `count_lines`/`grep`/`read_lines` rather than
 dumping whole files, so large logs and large sources stay within context.
@@ -75,17 +86,37 @@ $EDITOR ~/.config/testdiag/config.toml
 
 Configuration (file + `TESTDIAG_*` env overrides; env always wins, for CI
 secrets) is documented in [`config.example.toml`](config.example.toml). At
-minimum set the LLM `base_url` + `model` and your Jenkins `user` + `api_token`.
+minimum: define at least one LLM under `[llms.<name>]` (with `base_url` +
+`model`), assign one to each stage under `[stages]`, and set your Jenkins
+`user` + `api_token`.
+
+```toml
+[llms.fast]
+base_url = "http://localhost:1234/v1"
+model    = "your-fast-model"
+[llms.deep]
+base_url = "http://localhost:5678/v1"
+model    = "your-strong-model"
+
+[stages]
+logparse    = "fast"   # reads the log, writes the brief
+deepinspect = "deep"   # gets the brief + source tools, finds the root cause
+```
+
+(The two stages may point at the **same** LLM if you only have one.) Per-LLM
+secrets can come from `TESTDIAG_LLM_<NAME>_API_KEY` etc.
 
 Useful knobs:
 
-- `llm.normalize_tool_calls` / `llm.inject_tools` — front the endpoint with the
-  in-process proxy that rewrites open-model tool-call syntaxes into the one form
-  the agent parses, and advertises the workspace tools to the model. On by
-  default; see below.
-- `diagnosis.max_attempts` — agent runs per test (>1 enables the critique/revise
-  loop; 1 disables it).
-- `diagnosis.max_tool_iterations` — tool calls allowed within one attempt.
+- `[llms.<name>].context_window` — sizes how much of the log LOGPARSE inlines.
+- `[proxy].normalize_tool_calls` / `[proxy].inject_tools` — front each endpoint
+  with the in-process proxy that rewrites open-model tool-call syntaxes into the
+  one form the agent parses, and advertises the workspace tools to the model. On
+  by default; see below.
+- `diagnosis.max_attempts` — DEEPINSPECT runs per test (>1 enables the
+  critique/revise loop; 1 disables it).
+- `diagnosis.max_tool_iterations` — tool calls allowed within one DEEPINSPECT
+  attempt.
 
 Put a `TEST_AGENT.md` at the root of the workspace you run against; its contents
 are injected into every diagnosis as background context.
@@ -128,21 +159,25 @@ workspace tools into each request and runs the response through `internal/toolpr
 which normalizes the various native tool-call syntaxes open models emit
 (GPT-OSS Harmony, Gemma ` ```tool_code `, Mistral `[TOOL_CALLS]`,
 Nemotron `<TOOLCALL>`, Llama 3.x bare-JSON / `<|python_tag|>`, plus structured
-`tool_calls`) into the one shape the agent recognizes. `main.go` starts the proxy
-and repoints `base_url` at it when `llm.normalize_tool_calls` is set.
+`tool_calls`) into the one shape the agent recognizes. `main.go` starts the
+proxies and repoints each stage's `base_url` at one when `[proxy].normalize_tool_calls`
+(or `--debug` / `-v`) is set. It runs at most one proxy per distinct
+(endpoint, advertised tool set): DEEPINSPECT's proxy advertises the **source**
+tools, LOGPARSE's advertises **none**, so the log tools never reach DEEPINSPECT.
 
 ## Layout
 
 ```
-main.go                     CLI + sequential orchestration
-internal/config             config file + env overrides
+main.go                     CLI + sequential orchestration + per-stage proxies
+internal/config             named LLMs, stage assignments, env overrides
 internal/jenkins            fetch /api/json, parse failed cases
+internal/pipeline           the DOWNLOAD → LOGPARSE → DEEPINSPECT state machine
 internal/mapping            test -> source file  (STUB)
 internal/workspace          path jail for the file tools
 internal/tools              the workspace tools (native-schema internal tools)
-internal/diagnose           per-test agent build, prompt, tool loop
+internal/diagnose           the DEEPINSPECT agent: build, prompt, tool loop
 internal/report             Markdown report writer
-internal/llmproxy           in-process proxy fronting the LLM endpoint
+internal/llmproxy           in-process proxy fronting an LLM endpoint
 internal/toolproto          normalize open-model tool-call syntaxes
 ```
 
