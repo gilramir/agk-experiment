@@ -66,7 +66,7 @@ are injected into every diagnosis as background context.
 testdiag https://jenkins.example.com/job/myapp/1234/
 
 # Overrides:
-testdiag -j 8 --output ./reports https://jenkins.example.com/job/myapp/1234/testReport/
+testdiag --output ./reports https://jenkins.example.com/job/myapp/1234/testReport/
 
 # Filter to a subset of failures: pass one or more substrings after the URL.
 # Only failed tests whose name (class.method) contains any of them are
@@ -87,7 +87,7 @@ These are intentionally left for you to complete:
 ## Layout
 
 ```
-main.go                     CLI + parallel orchestration
+main.go                     CLI + sequential orchestration
 internal/config             config file + env overrides
 internal/jenkins            fetch /api/json, parse failed cases
 internal/mapping            test -> source file  (STUB)

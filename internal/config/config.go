@@ -75,8 +75,7 @@ type Diagnosis struct {
 
 // Output controls how diagnosis reports are written.
 type Output struct {
-	Dir     string `toml:"dir"`     // directory for the markdown reports
-	Workers int    `toml:"workers"` // parallel worker count (per-test independence)
+	Dir string `toml:"dir"` // directory for the markdown reports
 }
 
 // Path returns the default config file location.
@@ -129,8 +128,7 @@ func defaults() *Config {
 			InjectTools:        true,
 		},
 		Output: Output{
-			Dir:     "test-diagnosis",
-			Workers: 4,
+			Dir: "test-diagnosis",
 		},
 		Diagnosis: Diagnosis{
 			MaxAttempts: 2,
@@ -156,7 +154,6 @@ func applyEnvOverrides(cfg *Config) {
 	setStr(&cfg.Workspace.Root, "TESTDIAG_WORKSPACE_ROOT")
 
 	setStr(&cfg.Output.Dir, "TESTDIAG_OUTPUT_DIR")
-	setInt(&cfg.Output.Workers, "TESTDIAG_WORKERS")
 
 	setInt(&cfg.Diagnosis.MaxAttempts, "TESTDIAG_MAX_ATTEMPTS")
 }
@@ -167,9 +164,6 @@ func (c *Config) validate() error {
 	}
 	if c.LLM.BaseURL == "" {
 		return fmt.Errorf("llm.base_url is required for an OpenAI-compatible endpoint")
-	}
-	if c.Output.Workers < 1 {
-		c.Output.Workers = 1
 	}
 	if c.Diagnosis.MaxAttempts < 1 {
 		c.Diagnosis.MaxAttempts = 1

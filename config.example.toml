@@ -40,6 +40,6 @@ inject_tools         = true
 root = ""
 
 [output]
-#   env: TESTDIAG_OUTPUT_DIR, TESTDIAG_WORKERS
-dir     = "test-diagnosis"   # one Markdown report per failed test is written here
-workers = 4                  # failed tests are diagnosed in parallel
+#   env: TESTDIAG_OUTPUT_DIR
+dir = "test-diagnosis"   # one Markdown report per failed test is written here
+# Failed tests are diagnosed one at a time, in order.

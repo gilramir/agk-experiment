@@ -24,19 +24,20 @@ go test ./internal/workspace/ -run TestResolve -v   # run a single test once the
 
 # Run it (needs config + a reachable LLM endpoint; see Setup in README.md):
 go run . https://jenkins.example.com/job/myapp/1234/
-go run . -j 8 --output ./reports <url>
+go run . --output ./reports <url>
 ```
 
 There is currently **no test suite**; `go test ./...` reports `[no test files]`.
 
 ## Architecture
 
-The pipeline is a fan-out: fetch failures → diagnose each independently in a
-worker pool → write a report each.
+The pipeline is sequential: fetch failures → diagnose each independently, one at
+a time → write a report each.
 
 - **`main.go`** — CLI parsing (`github.com/gilramir/argparse/v2`), config load,
-  and `process()`, a bounded worker pool. Each failed test is fully independent,
-  so workers never share agent state.
+  and `process()`, which diagnoses failures one at a time, in order. Each failed
+  test is fully independent (no shared agent state); they are run sequentially so
+  the output and the `run_script` approval prompts stay coherent for the operator.
 - **`internal/config`** — TOML at `~/.config/testdiag/config.toml`, with
   `TESTDIAG_*` env vars overriding the file (env always wins, for CI secrets).
   `LLM.BaseURL` + `LLM.Model` are required.
@@ -57,9 +58,12 @@ worker pool → write a report each.
   implement `v1beta.Tool` with a `JSONSchema()` so the provider calls them
   natively. `Register(ws)` registers them **once at startup** via the global
   `vnext.RegisterInternalTool` before any agent is built, so each tool is a
-  single shared, **stateless** instance (workers run concurrently — never store
-  per-test state on a tool). All have hard output caps (file size, line span,
-  match/entry/file counts) to protect the context window.
+  single shared, **stateless** instance reused across every test — never store
+  per-test state on a tool. All have hard output caps (file size, line span,
+  match/entry/file counts) to protect the context window. One exception to the
+  read-only rule: `run_script` writes and executes a shell/Python script in the
+  workspace root, but only after the operator approves the exact script at a
+  `1 = Yes / 2 = No` prompt; a decline runs nothing.
 - **`internal/diagnose`** — the core. `Diagnoser.Diagnose` maps the test, saves
   the full failure log under `<workspace>/.testdiag/logs/` (so the jailed tools
   can read it), builds a **fresh agent per test** (memory disabled, reasoning

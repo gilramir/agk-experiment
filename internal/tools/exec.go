@@ -38,8 +38,7 @@ var interpreters = map[string][]string{
 
 // Confirmer asks the operator to approve running a script, returning true to
 // proceed. The script body and language are passed so the UI can show exactly
-// what will run. It is called serialized (see confirmMu) so concurrent workers'
-// prompts never interleave on the shared terminal.
+// what will run.
 type Confirmer func(language, script string) bool
 
 var (
@@ -132,11 +131,13 @@ func (t *runScriptTool) Execute(ctx context.Context, args map[string]interface{}
 		return fail("run_script: script is %d bytes, exceeding the %d-byte limit; make it smaller", len(script), maxScriptBytes)
 	}
 
-	// Ask the operator. Serialize so concurrent workers prompt one at a time and
-	// their output never interleaves on the shared terminal.
+	// Ask the operator. The lock guards confirmFn against a concurrent
+	// SetConfirmer and serializes the prompt should the tool ever be called
+	// from more than one goroutine.
 	confirmMu.Lock()
-	approved := confirmFn(strings.ToLower(language), script)
+	confirm := confirmFn
 	confirmMu.Unlock()
+	approved := confirm(strings.ToLower(language), script)
 	if !approved {
 		return ok(map[string]interface{}{
 			"approved": false,

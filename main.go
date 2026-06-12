@@ -16,7 +16,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"sync"
 	"syscall"
 
 	"github.com/gilramir/argparse/v2"
@@ -39,10 +38,8 @@ import (
 const backgroundFile = "TEST_AGENT.md"
 
 // options holds the parsed command-line arguments. Field names map to the
-// argparse switches/positional (e.g. --jobs -> Workers and the "url" positional
-// -> URL, both via their Dest).
+// argparse switches/positional (e.g. the "url" positional -> URL via its Dest).
 type options struct {
-	Workers int
 	Output  string
 	Debug   bool
 	Verbose bool
@@ -65,12 +62,6 @@ func run() error {
 		Epilog: "Configuration is read from ~/.config/testdiag/config.toml and may be " +
 			"overridden with TESTDIAG_* environment variables. The URL may be a build " +
 			"or test-report URL; /api/json is appended automatically.",
-	})
-	ap.Add(&argparse.Argument{
-		Switches: []string{"-j", "--jobs"},
-		Dest:     "Workers",
-		MetaVar:  "N",
-		Help:     "Parallel workers (overrides config; 0 = use config)",
 	})
 	ap.Add(&argparse.Argument{
 		Switches: []string{"-o", "--output"},
@@ -105,9 +96,6 @@ func run() error {
 	cfg, err := config.Load()
 	if err != nil {
 		return err
-	}
-	if opts.Workers > 0 {
-		cfg.Output.Workers = opts.Workers
 	}
 	if opts.Output != "" {
 		cfg.Output.Dir = opts.Output
@@ -186,63 +174,34 @@ func run() error {
 	fmt.Printf("Found %d failed test(s). Workspace: %s\n", len(failures), ws.Root())
 	fmt.Printf("LLM: %s @ %s (model %s). Tools: %v\n",
 		cfg.LLM.Provider, cfg.LLM.BaseURL, cfg.LLM.Model, toolNames)
-	fmt.Printf("Diagnosing with %d worker(s); reports -> %s\n\n", cfg.Output.Workers, cfg.Output.Dir)
+	fmt.Printf("Diagnosing one at a time; reports -> %s\n\n", cfg.Output.Dir)
 
 	d := diagnose.New(cfg, ws, background)
 	return process(ctx, d, failures, cfg.Output)
 }
 
-// process runs diagnoses across a bounded worker pool (per-test independence).
+// process diagnoses failures one at a time, in order. Each test is independent,
+// but running them sequentially keeps the output (and the run_script approval
+// prompts) coherent for the operator rather than interleaving many at once.
 func process(ctx context.Context, d *diagnose.Diagnoser, failures []jenkins.FailedTest, out config.Output) error {
-	jobs := make(chan jenkins.FailedTest)
-	var (
-		wg       sync.WaitGroup
-		mu       sync.Mutex
-		failed   int
-		analyzed int
-	)
+	var failed, analyzed int
 
-	worker := func() {
-		defer wg.Done()
-		for test := range jobs {
-			if ctx.Err() != nil {
-				return
-			}
-			res, err := d.Diagnose(ctx, test)
-			mu.Lock()
-			if err != nil {
-				failed++
-				fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", test.FullName(), err)
-			} else if path, werr := report.Write(out.Dir, res); werr != nil {
-				failed++
-				fmt.Fprintf(os.Stderr, "  ✗ %s: writing report: %v\n", test.FullName(), werr)
-			} else {
-				analyzed++
-				fmt.Printf("  ✓ %s -> %s (%s)\n", test.FullName(), path, res.Duration.Round(1e6))
-			}
-			mu.Unlock()
+	for _, test := range failures {
+		if ctx.Err() != nil {
+			break
+		}
+		res, err := d.Diagnose(ctx, test)
+		if err != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "  ✗ %s: %v\n", test.FullName(), err)
+		} else if path, werr := report.Write(out.Dir, res); werr != nil {
+			failed++
+			fmt.Fprintf(os.Stderr, "  ✗ %s: writing report: %v\n", test.FullName(), werr)
+		} else {
+			analyzed++
+			fmt.Printf("  ✓ %s -> %s (%s)\n", test.FullName(), path, res.Duration.Round(1e6))
 		}
 	}
-
-	n := out.Workers
-	if n < 1 {
-		n = 1
-	}
-	wg.Add(n)
-	for i := 0; i < n; i++ {
-		go worker()
-	}
-
-	for _, t := range failures {
-		select {
-		case <-ctx.Done():
-			goto done
-		case jobs <- t:
-		}
-	}
-done:
-	close(jobs)
-	wg.Wait()
 
 	fmt.Printf("\nDone. %d analyzed, %d failed.\n", analyzed, failed)
 	if err := ctx.Err(); err != nil {
