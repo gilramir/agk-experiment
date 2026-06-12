@@ -47,6 +47,7 @@ func toolDefs(ws *workspace.Workspace) []vnext.Tool {
 		&gitLogTool{ws: ws},
 		&readLogTool{ws: ws},
 		&grepLogTool{ws: ws},
+		&runScriptTool{ws: ws},
 	}
 }
 

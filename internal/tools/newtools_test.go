@@ -183,3 +183,99 @@ func TestGitBlameAndLog(t *testing.T) {
 		t.Errorf("log missing commit subject:\n%v", res.Content)
 	}
 }
+
+// withConfirmer swaps the run_script approval policy for the duration of a test
+// and restores the default afterward.
+func withConfirmer(t *testing.T, c Confirmer) {
+	t.Helper()
+	SetConfirmer(c)
+	t.Cleanup(func() { SetConfirmer(nil) })
+}
+
+func TestRunScriptApprovedShell(t *testing.T) {
+	ws, _ := setupWS(t)
+	withConfirmer(t, func(language, script string) bool { return true })
+
+	tool := &runScriptTool{ws: ws}
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"language": "shell",
+		"script":   "echo out; echo err 1>&2; exit 3",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.Content.(map[string]interface{})
+	if c["approved"] != true {
+		t.Fatalf("want approved, got %v", c["approved"])
+	}
+	if c["exit_code"] != 3 {
+		t.Errorf("exit_code = %v, want 3", c["exit_code"])
+	}
+	if !strings.Contains(c["stdout"].(string), "out") {
+		t.Errorf("stdout = %q, want it to contain 'out'", c["stdout"])
+	}
+	if !strings.Contains(c["stderr"].(string), "err") {
+		t.Errorf("stderr = %q, want it to contain 'err'", c["stderr"])
+	}
+}
+
+func TestRunScriptRunsInWorkspace(t *testing.T) {
+	ws, root := setupWS(t)
+	withConfirmer(t, func(language, script string) bool { return true })
+
+	tool := &runScriptTool{ws: ws}
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"language": "shell",
+		"script":   "pwd",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.TrimSpace(res.Content.(map[string]interface{})["stdout"].(string))
+	// macOS /var -> /private/var symlinks, so compare against the resolved root.
+	want, _ := filepath.EvalSymlinks(root)
+	if got != want && got != root {
+		t.Errorf("cwd = %q, want workspace root %q", got, want)
+	}
+}
+
+func TestRunScriptDeclinedDoesNotRun(t *testing.T) {
+	ws, _ := setupWS(t)
+	withConfirmer(t, func(language, script string) bool { return false })
+
+	tool := &runScriptTool{ws: ws}
+	res, err := tool.Execute(context.Background(), map[string]interface{}{
+		"language": "shell",
+		// If this ever ran it would create a marker file; we assert it never does.
+		"script": "touch SHOULD_NOT_EXIST",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := res.Content.(map[string]interface{})
+	if c["approved"] != false {
+		t.Fatalf("want approved=false, got %v", c["approved"])
+	}
+	if _, ok := c["exit_code"]; ok {
+		t.Error("declined script should not report an exit_code")
+	}
+	if _, err := os.Stat(filepath.Join(ws.Root(), "SHOULD_NOT_EXIST")); !os.IsNotExist(err) {
+		t.Error("declined script must not execute")
+	}
+}
+
+func TestRunScriptUnsupportedLanguage(t *testing.T) {
+	ws, _ := setupWS(t)
+	withConfirmer(t, func(language, script string) bool {
+		t.Fatal("confirmer must not be called for an unsupported language")
+		return false
+	})
+	tool := &runScriptTool{ws: ws}
+	res, _ := tool.Execute(context.Background(), map[string]interface{}{
+		"language": "ruby",
+		"script":   "puts 1",
+	})
+	if res.Success {
+		t.Fatal("want failure for unsupported language")
+	}
+}
