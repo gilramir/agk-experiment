@@ -6,15 +6,26 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 `testdiag` is a Go CLI that diagnoses Jenkins test failures with an LLM. Given a
 Jenkins build URL it fetches the test report, and for each failed test it runs a
-**state machine of stages** — DOWNLOAD (save the log) → LOGPARSE (one tool-less
-LLM pass that distils the log into an investigation brief) → DEEPINSPECT (a fresh
-agent that gets ONLY the brief plus the workspace **source** tools, jailed to the
-checkout, and finds the root cause) — writing one Markdown report per failure.
-Each stage hands off to the next through a Markdown file on disk, and LOGPARSE
-and DEEPINSPECT can run on different (named) LLMs.
+**state machine of stages**, writing one Markdown report per failure:
 
-See `README.md` for the user-facing description and `plan.txt` for the original
-design notes.
+```
+DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
+[DEEPINSPECT → FEEDBACK] × N → COMBINE → FEEDBACK
+```
+
+- **DOWNLOAD** — save the raw failure log to disk
+- **LOGPARSE** — tool-less LLM pass that distils the log into an investigation brief
+- **FEEDBACK** — tool-less LLM gate: accepts the brief or rejects it with a critique; LOGPARSE retries with the critique up to `logparse_max_feedbacks` times
+- **HYPOTHESIZE** — tool-less LLM pass that reads the brief plus an optional architecture document and produces a ranked list of 1–N hypotheses; 0 hypotheses abandons the test
+- **FEEDBACK** — gate on the hypothesis list (`hypothesize_max_feedbacks`)
+- **DEEPINSPECT × N** — one fresh agent per hypothesis, jailed to the workspace source tools; investigates whether that hypothesis is CONFIRMED / REFUTED / INCONCLUSIVE
+- **FEEDBACK per DEEPINSPECT** — gate on each DEEPINSPECT result (`deepinspect_max_feedbacks`); a failed hypothesis is soft-failed (noted but does not stop the pipeline)
+- **COMBINE** — tool-less LLM pass that reads all hypotheses and DEEPINSPECT results and selects the best-supported root cause
+- **FEEDBACK** — gate on the combined analysis (`combine_max_feedbacks`)
+
+Each stage hands off to the next through a Markdown file on disk (`.testdiag/handoff/`) and each LLM can be configured independently. Different LLMs can be assigned to different stages so a cheap model can parse the log while a stronger one does the source tracing.
+
+See `README.md` for the user-facing description and `plan.txt` for the original design notes.
 
 ## Commands
 
@@ -22,52 +33,79 @@ design notes.
 go build ./...                       # build everything
 go build -o testdiag .               # build the CLI binary
 go vet ./...                         # vet
-go test ./...                        # run all tests (none exist yet)
-go test ./internal/workspace/ -run TestResolve -v   # run a single test once they exist
+go test ./...                        # run all tests
+go test ./internal/workspace/ -run TestResolve -v   # run a single test
 
 # Run it (needs config + a reachable LLM endpoint; see Setup in README.md):
 go run . https://jenkins.example.com/job/myapp/1234/
 go run . --output ./reports <url>
 ```
 
-There is currently **no test suite**; `go test ./...` reports `[no test files]`.
-
 ## Architecture
 
-The pipeline is sequential: fetch failures → run each failure through the stage
-state machine independently, one at a time → write a report each.
+The pipeline is sequential: fetch failures → run each failure through the stage state machine independently, one at a time → write a report.
 
 - **`main.go`** — CLI parsing (`github.com/gilramir/argparse/v2`), config load,
-  resolving the LLM for each stage (`cfg.LLMForStage`), starting the per-stage
-  LLM proxies (a `proxyManager` runs at most one proxy per distinct
-  `(endpoint, advertised tool set)` and repoints each LLM's `BaseURL`), and
-  `process()`, which runs each failure through the `pipeline` one at a time, in
-  order. Each failed test is fully independent (no shared agent state); they are
-  run sequentially so the output and the `run_script` approval prompts stay
-  coherent for the operator.
-- **`internal/config`** — TOML at `~/.config/testdiag/config.toml`, with
-  `TESTDIAG_*` env vars overriding the file (env always wins, for CI secrets).
-  LLMs are defined once under `[llms.<name>]` (`LLMs map[string]LLMSpec`) and each
-  stage points at one by name under `[stages]` (`Stages map[string]string`);
-  `LLMForStage` resolves the pair and errors clearly if a stage is unassigned or
-  names an undefined LLM. Each referenced LLM needs `base_url` + `model`. Proxy
-  knobs live under `[proxy]`. Per-LLM secrets can come from
-  `TESTDIAG_LLM_<NAME>_{API_KEY,BASE_URL,MODEL}`.
+  resolving the LLM for each stage (`cfg.LLMForStage` / `cfg.LLMForStageOptional`),
+  starting the per-stage LLM proxies (a `proxyManager` runs at most one proxy per
+  distinct `(endpoint, advertised tool set)` and repoints each LLM's `BaseURL`), and
+  `process()`, which runs each failure through the `pipeline` one at a time in order.
+  LLMs for optional stages (HYPOTHESIZE, COMBINE, and all feedback stages) fall back
+  to the logparse LLM when not explicitly configured. Each failed test is fully
+  independent (no shared agent state); sequential execution keeps output and
+  `run_script` approval prompts coherent for the operator.
+
+- **`internal/config`** — TOML at `~/.config/testdiag/config.toml`, with `TESTDIAG_*`
+  env vars overriding the file (env always wins, for CI secrets). LLMs are defined
+  once under `[llms.<name>]` and each stage points at one by name under `[stages]`;
+  `LLMForStage` resolves the pair and errors clearly if a required stage is unassigned.
+  Optional stage assignments (hypothesize, combine, all feedback stages) are resolved
+  via `LLMForStageOptional` and fall back to a sensible default at the call site.
+  Per-stage tuning knobs live under `[stage_config]` as a flat struct (`StageConfig`):
+  `logparse_max_feedbacks`, `hypothesize_max_feedbacks`, `deepinspect_max_feedbacks`,
+  `deepinspect_max_tool_iterations`, `combine_max_feedbacks` — each has a
+  `TESTDIAG_<STAGE>_*` env var. `Workspace.ArchitectureDoc` (config key
+  `workspace.architecture_doc`, env `TESTDIAG_ARCHITECTURE_DOC`) is the
+  workspace-relative path to an architecture document HYPOTHESIZE reads.
+
 - **`internal/pipeline`** — the stage state machine. `Pipeline.Run` threads a
-  per-test `Context` through ordered `Stage`s: `download.go` (saves the combined
-  log under `.testdiag/logs/`), `logparse.go` (a tool-less, memoryless single-pass
-  agent on the LOGPARSE LLM that excerpts the log to the model's context window
-  and writes the brief to `.testdiag/handoff/<test>.logparse.md`), and
-  `deepinspect.go` (wraps `internal/diagnose`). Add new stages to the slice in
-  `New`. `combinedLog`/`sanitize` live here (DOWNLOAD owns log materialization).
+  per-test `Context` through ordered `Stage`s, stopping at the first unrecoverable
+  error, and returns a `FinalResult`. The stages are:
+  - `download.go` — saves the combined log under `.testdiag/logs/`
+  - `logparse.go` — tool-less agent excerpts the log and writes the brief to
+    `.testdiag/handoff/<test>.logparse.md`; retries with FEEDBACK critique up to
+    `maxFeedbacks` times
+  - `hypothesize.go` — tool-less agent reads the brief + arch doc and produces a
+    numbered hypothesis list (`.testdiag/handoff/<test>.hypothesize.md`); parses
+    `## Hypothesis N: title` headers via regex; retries with FEEDBACK up to
+    `maxFeedbacks` times; errors if 0 hypotheses result
+  - `deepinspect.go` — `deepInspectAllStage` iterates over `sc.Hypotheses`, calls
+    `diagnose.Diagnoser.Diagnose` per hypothesis, runs FEEDBACK on each result, and
+    soft-fails any hypothesis whose agent errored or whose feedback was exhausted;
+    results accumulate in `sc.DeepInspects`
+  - `combine.go` — tool-less agent receives all hypotheses + DEEPINSPECT outcomes
+    and selects the best root cause (`.testdiag/handoff/<test>.combine.md`)
+  - `feedback.go` — `feedbackChecker` is a shared struct with a configurable
+    `systemPrompt` field; each stage gate uses a different prompt constant
+    (`logParseFeedbackPrompt`, `hypothesizeFeedbackPrompt`, `deepInspectFeedbackPrompt`,
+    `combineFeedbackPrompt`). `feedbackChecker.Check` returns APPROVED or a critique
+    string the caller uses to build a retry prompt.
+
+  Key types in `pipeline.go`: `Hypothesis{Index, Title, Description}`,
+  `DeepInspectOutcome{Hypothesis, Content, ToolsCalled, FeedbackApproved, Failed,
+  FailReason}`, `FinalResult` (returned by `Run`, consumed by `report`),
+  `StageSpec{LLM, FeedbackLLM}`, `PipelineSpec` (passed to `New`).
+
 - **`internal/jenkins`** — normalizes any build/testReport URL to
   `…/api/json?depth=1`, HTTP Basic auth (user + API **token**, not password),
   parses `suites[].cases[]`, returns cases whose status is FAILED/REGRESSION/ERROR.
+
 - **`internal/workspace`** — the security boundary. `Workspace.Resolve` jails all
   tool paths to the checkout root: absolute paths are reinterpreted relative to
   the root, and symlinks are evaluated and re-prefix-checked so they can't escape.
   Every file tool must go through this; don't add direct `os.Open` on
   model-supplied paths elsewhere.
+
 - **`internal/tools`** — the read-only tools exposed to the model, all jailed to
   the workspace: single-file (`read_file`, `list_directory`, `count_lines`,
   `read_lines`, `grep`), tree-wide (`search_repo` recursive grep, `find_files`
@@ -84,54 +122,59 @@ state machine independently, one at a time → write a report each.
   package-level flag: DEEPINSPECT calls `tools.SetLogToolsEnabled(false)` so they
   refuse to run, and they are also excluded from the tool set it advertises
   (`tools.SchemasExcluding(tools.LogToolNames...)`) — defense in depth so the deep
-  agent works from the brief, not the raw log. One exception to the
-  read-only rule: `run_script` writes and executes a shell/Python script in the
-  workspace root, but only after the operator approves the exact script at a
-  `1 = Yes / 2 = No` prompt; a decline runs nothing. The other writer is
-  `notebook` (`append`/`read`): a per-test Markdown scratchpad the agent uses as
-  working memory — it records what it's looking for and why, and re-reads to
-  refresh. Its path is NOT a model argument; it's a fixed `.testdiag/notes/<test>.md`
-  set per test via `tools.SetNotebookPath`, so the model can't write anywhere
-  else. Every call goes through a `loggingTool` wrapper that also guards against
-  loops: if the model makes the exact same `(tool, args)` call `loopThreshold`
-  times in one run, the call is intercepted and replaced with a nudge to try a
-  different approach instead of re-executing. `diagnose` calls
+  agent works from the brief, not the raw log. One exception to the read-only rule:
+  `run_script` writes and executes a shell/Python script in the workspace root, but
+  only after the operator approves the exact script at a `1 = Yes / 2 = No` prompt;
+  a decline runs nothing. The other writer is `notebook` (`append`/`read`): a
+  per-hypothesis Markdown scratchpad the agent uses as working memory. Its path is
+  NOT a model argument; it's fixed at `.testdiag/notes/<test>.h<N>.md` (one file per
+  hypothesis index) set via `tools.SetNotebookPath` before each DEEPINSPECT run, so
+  the model can't write anywhere else. Every call goes through a `loggingTool`
+  wrapper that also guards against loops: if the model makes the exact same
+  `(tool, args)` call `loopThreshold` times in one run, the call is intercepted and
+  replaced with a nudge to try a different approach. `diagnose` calls
   `tools.ResetLoopGuard()` before each agent run to scope detection to a single
   attempt. Tools that opt out via the `loopExempt` marker (the `notebook`, whose
   re-reads legitimately change as notes accumulate) are never guarded.
-- **`internal/diagnose`** — the DEEPINSPECT engine. `Diagnoser.Diagnose(ctx,
-  test, logRel, brief)` maps the test, starts a fresh per-test notebook under
-  `.testdiag/notes/` and points the `notebook` tool at it, **hard-disables the
-  log tools** for the run, builds a **fresh agent per test** (memory disabled,
-  reasoning loop enabled, capped at `maxToolIterations`), and runs it. It is
-  seeded with the LOGPARSE **brief**, not the raw log (`logRel` is carried only
-  into the report metadata). Disk is the only working memory carried across the
-  agent's tool loop. `prompt.go` holds the system prompt and assembles the first
-  user message from the brief. The agent is built with **no builder preset**:
-  internal tools attach via `Tools.Enabled` alone, and the `ChatAgent` preset
-  would clobber the system prompt / temperature and re-enable memory after
-  `WithConfig` (same for the LOGPARSE agent).
+
+- **`internal/diagnose`** — the DEEPINSPECT engine. `Diagnoser.New(ws, llm,
+  background, maxToolIterations)` creates a diagnoser. `Diagnose(ctx, DiagnoseInput)`
+  accepts a `DiagnoseInput{Test, Brief, Hypothesis, HypothesisIndex, PrevResult,
+  Critique}`, maps the test (via `internal/mapping`), prepares a fresh per-hypothesis
+  notebook (`.testdiag/notes/<test>.h<N>.md`), hard-disables the log tools, builds
+  a fresh agent (memory disabled, reasoning loop enabled, capped at
+  `maxToolIterations`), and runs it once. When `PrevResult`+`Critique` are set, the
+  user message includes the prior draft and feedback so the retry goes deeper. The
+  `brief` and `hypothesis` are injected into the **system prompt** (not only the user
+  message) so they survive AGK's continuation loop, which drops the original user
+  message after the first tool round-trip and replaces it with "Previous response +
+  tool results". No internal critique/revise loop — that is now handled externally by
+  `deepInspectAllStage` + `feedbackChecker`.
+
 - **`internal/mapping`** — **STUB.** `MapTestToSource` returns an empty path; the
-  agent then finds the file itself via `list_directory`/`grep`. This is the one
-  intentional placeholder — implementing the project-specific test→source mapping
-  gives the agent a precise starting point. Returning an empty `SourceFile` is a
-  valid, safe outcome.
+  agent then finds the file itself via `list_directory`/`grep`. Implementing the
+  project-specific test→source mapping gives the agent a precise starting point.
+  Returning an empty `SourceFile` is a valid, safe outcome.
+
 - **`internal/report`** — writes one Markdown root-cause report per test into the
-  output dir.
+  output dir. Takes `pipeline.FinalResult`; renders the COMBINE output as the main
+  body and appends a per-hypothesis DEEPINSPECT appendix (collapsed in `<details>`).
+
 - **`internal/toolproto`** — normalizes the various native tool-call syntaxes
   open models emit (GPT-OSS Harmony, Gemma ` ```tool_code `, Mistral
   `[TOOL_CALLS]`, Nemotron `<TOOLCALL>`, Llama 3.x bare-JSON / `<|python_tag|>`,
   plus structured `tool_calls`) into the one text shape AgenticGoKit's parser
-  recognizes:
-  `TOOL_CALL{"name":...,"args":{...}}`. Pure functions; well covered by tests.
-- **`internal/llmproxy`** — an in-process reverse proxy fronting the LLM
-  endpoint. Needed because AgenticGoKit v0.5.x's OpenAI adapter does **no**
-  native tool calling: it never sends a `tools` array and reads only
-  `choices[].message.content`, leaving the agent to parse tool calls out of
-  text. The proxy injects the workspace tools into each request and runs the
-  response `content` (and any structured `tool_calls`) through `toolproto`
-  before AgenticGoKit sees it. `main.go` starts it and repoints
-  `cfg.LLM.BaseURL` at it when `llm.normalize_tool_calls` is set (default on).
+  recognizes: `TOOL_CALL{"name":...,"args":{...}}`. Pure functions; well covered by tests.
+
+- **`internal/llmproxy`** — an in-process reverse proxy fronting the LLM endpoint.
+  Needed because AgenticGoKit v0.5.x's OpenAI adapter does **no** native tool
+  calling: it never sends a `tools` array and reads only `choices[].message.content`,
+  leaving the agent to parse tool calls out of text. The proxy injects the workspace
+  tools into each request and runs the response `content` (and any structured
+  `tool_calls`) through `toolproto` before AgenticGoKit sees it. `main.go` starts it
+  and repoints each LLM's `BaseURL` at it. Two stages that share the same endpoint
+  and tool set share one proxy instance; DEEPINSPECT gets a separate proxy because
+  it advertises the source tools while all other stages advertise none.
 
 ## Key conventions
 
@@ -147,3 +190,11 @@ state machine independently, one at a time → write a report each.
 - New tools exposed to the model must implement `v1beta.Tool`, be added to the
   slice in `tools.Register`, take paths only via `workspace.Resolve`, and cap
   their output size.
+- All agents are built with **no builder preset**: internal tools attach via
+  `Tools.Enabled` alone (DiscoverInternalTools), and presets like `ChatAgent` would
+  clobber the system prompt / temperature and re-enable memory after `WithConfig`.
+- The `feedbackChecker` pattern (tool-less agent with a stage-specific system prompt
+  that outputs `APPROVED` or `NEEDS REVISION: <critique>`) is the standard way to
+  gate stage output quality. Each stage that needs a feedback gate constructs one
+  in `pipeline.New` with the appropriate prompt constant from `feedback.go` and
+  passes it to the stage constructor.
