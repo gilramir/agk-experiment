@@ -105,6 +105,10 @@ func (s *logParseStage) saveBrief(sc *Context, brief string) error {
 	}
 	sc.LogParsePath = rel
 	sc.Brief = brief
+	if s.verbose {
+		fmt.Fprintf(os.Stdout, "--- LOGPARSE handoff for %s ---\n%s\n--- end ---\n\n",
+			sc.Test.FullName(), strings.TrimSpace(brief))
+	}
 	return nil
 }
 

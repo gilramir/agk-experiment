@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/gilbertr/testdiag/internal/diagnose"
 )
@@ -27,15 +26,6 @@ func newDeepInspectAllStage(d *diagnose.Diagnoser, fb *feedbackChecker, maxFeedb
 func (s *deepInspectAllStage) Name() State { return StateDeepInspect }
 
 func (s *deepInspectAllStage) Run(ctx context.Context, sc *Context) error {
-	if s.verbose {
-		brief := strings.TrimSpace(sc.Brief)
-		if brief == "" {
-			brief = "(empty)"
-		}
-		fmt.Fprintf(os.Stdout, "--- LOGPARSE brief for %s ---\n%s\n--- end of brief ---\n\n",
-			sc.Test.FullName(), brief)
-	}
-
 	sc.DeepInspects = make([]DeepInspectOutcome, 0, len(sc.Hypotheses))
 	for _, h := range sc.Hypotheses {
 		if ctx.Err() != nil {
@@ -55,8 +45,8 @@ func (s *deepInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothe
 	out := DeepInspectOutcome{Hypothesis: h}
 
 	if s.verbose {
-		fmt.Fprintf(os.Stdout, "  DEEPINSPECT hypothesis %d/%d: %s\n",
-			h.Index, len(sc.Hypotheses), h.Title)
+		fmt.Fprintf(os.Stdout, "--- handoff to DEEPINSPECT h%d/%d for %s ---\n%s\n--- end ---\n\n",
+			h.Index, len(sc.Hypotheses), sc.Test.FullName(), h.Text())
 	}
 
 	var (
