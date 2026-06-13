@@ -3,10 +3,13 @@
 # Copy to ~/.config/testdiag/config.toml and edit. Every value can also be set
 # (or overridden) with an environment variable — handy for secrets in CI.
 #
-# The workflow is a state machine of stages: DOWNLOAD → LOGPARSE → DEEPINSPECT.
+# The pipeline is:
+#   DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
+#   [DEEPINSPECT → FEEDBACK] × N → COMBINE → FEEDBACK
+#
 # You define LLMs once under [llms.<name>] and point each stage at one by name
-# under [stages], so a cheap model can summarize the log while a stronger model
-# does the deep source tracing.
+# under [stages]. Only logparse and deepinspect are required; everything else
+# falls back to the logparse LLM when unassigned.
 
 [jenkins]
 # Jenkins uses HTTP Basic auth with your username + a personal API token
@@ -23,7 +26,7 @@ api_token = "your-jenkins-api-token"
 # ---------------------------------------------------------------------------
 
 [llms.fast]
-# A cheaper/faster model: good enough to read the log and write the brief.
+# A cheaper/faster model: good enough to read the log, hypothesize, and combine.
 provider       = "openai"
 base_url       = "http://localhost:1234/v1"
 model          = "your-fast-model"
@@ -33,7 +36,7 @@ temperature    = 0.0
 max_tokens     = 4096
 
 [llms.deep]
-# A stronger model: traces the source to find the root cause.
+# A stronger model: traces source across boundaries to confirm or refute hypotheses.
 provider       = "openai"
 base_url       = "http://localhost:5678/v1"
 model          = "your-strong-model"
@@ -42,21 +45,44 @@ context_window = 131072
 temperature    = 0.0
 max_tokens     = 4096
 
+# ---------------------------------------------------------------------------
+# Stage → LLM assignments.
+#
+# Required:
+#   logparse    — reads the raw failure log, writes the investigation brief
+#   deepinspect — gets ONLY the brief + one hypothesis + source tools; no raw log
+#
+# Optional (all default to the logparse LLM when unset):
+#   hypothesize          — reads the brief + architecture doc, produces hypotheses
+#   combine              — reads all hypotheses + DEEPINSPECT results, picks the best
+#   logparse_feedback    — checks the LOGPARSE brief quality
+#   hypothesize_feedback — checks the HYPOTHESIZE hypothesis list
+#   deepinspect_feedback — checks each DEEPINSPECT result
+#   combine_feedback     — checks the COMBINE analysis
+#
+# Stages that share the same endpoint and tool set reuse one proxy instance, so
+# pointing multiple optional stages at "fast" costs nothing extra.
+# ---------------------------------------------------------------------------
+
 [stages]
-# Assign an LLM (by name above) to each stage. Both are required.
-logparse    = "fast"   # reads the raw log, emits the investigation brief
-deepinspect = "deep"   # gets ONLY the brief (not the raw log) + source tools
+logparse    = "fast"
+deepinspect = "deep"
+# hypothesize          = "fast"
+# combine              = "fast"
+# logparse_feedback    = "fast"
+# hypothesize_feedback = "fast"
+# deepinspect_feedback = "fast"
+# combine_feedback     = "fast"
 
 [proxy]
-# Tool-call protocol normalization, applied to every stage's endpoint. Different
-# open models (GPT-OSS, Gemma, Mistral, Nemotron, Llama 3.x) emit tool calls in
-# their own native syntax, which AgenticGoKit's text parser doesn't recognize.
-# With this on, requests go through an in-process proxy that rewrites those into
-# the form the agent parses, and advertises the workspace tools to the model.
+# Tool-call protocol normalization. Different open models (GPT-OSS, Gemma,
+# Mistral, Nemotron, Llama 3.x) emit tool calls in their own native syntax;
+# the proxy rewrites them into the form the agent parses and advertises the
+# workspace tools to the model.
 # Leave on unless your model already emits a recognized format
-# (normalize_tool_calls=false), or your server rejects a tools array
-# (inject_tools=false). DEEPINSPECT is only ever advertised the SOURCE tools;
-# the raw-log tools are withheld so it works from the brief.
+# (normalize_tool_calls=false) or your server rejects a tools array
+# (inject_tools=false). DEEPINSPECT is advertised only the SOURCE tools; the
+# raw-log tools are withheld so it works from the brief.
 #   env: TESTDIAG_PROXY_NORMALIZE_TOOL_CALLS, TESTDIAG_PROXY_INJECT_TOOLS,
 #        TESTDIAG_PROXY_DEBUG
 normalize_tool_calls = true
@@ -64,20 +90,43 @@ inject_tools         = true
 debug                = false   # also toggled by the --debug CLI flag
 
 [workspace]
-# The local checkout the Jenkins build ran against. TEST_AGENT.md is read from
-# the root of this directory and added to the prompt as project context.
-# Defaults to the current working directory if empty.
+# The local checkout the Jenkins build ran against. Defaults to the current
+# working directory when empty. TEST_AGENT.md is read from the root of this
+# directory and added to every DEEPINSPECT prompt as background context.
 #   env: TESTDIAG_WORKSPACE_ROOT
 root = ""
+
+# Optional: workspace-relative path to an architecture document. HYPOTHESIZE
+# reads it to reason about which system components could have caused the
+# failure. Leave empty to have HYPOTHESIZE work from the brief alone.
+#   env: TESTDIAG_ARCHITECTURE_DOC
+architecture_doc = ""   # e.g. "docs/architecture.md"
 
 [output]
 #   env: TESTDIAG_OUTPUT_DIR
 dir = "test-diagnosis"   # one Markdown report per failed test is written here
-# Failed tests are diagnosed one at a time, in order.
 
-[diagnosis]
-# Tunes the DEEPINSPECT agent loop.
-#   env: TESTDIAG_MAX_ATTEMPTS, TESTDIAG_MAX_TOOL_ITERATIONS
-max_attempts        = 3    # agent runs per test; >1 enables the critique/revise loop (1 disables it)
-max_tool_iterations = 50   # tool calls allowed within one attempt
-# Worst-case LLM round-trips per test (DEEPINSPECT) = max_attempts * max_tool_iterations.
+[stage_config]
+# Per-stage tuning. Each *_max_feedbacks value controls how many times the
+# FEEDBACK gate may reject that stage's output before the test is abandoned
+# (for logparse/hypothesize/combine) or the hypothesis is soft-failed
+# (for deepinspect). Set to 0 to disable feedback for that stage entirely.
+#
+# Worst-case LLM calls per test (DEEPINSPECT only, excluding feedback):
+#   N_hypotheses × (deepinspect_max_feedbacks + 1) × deepinspect_max_tool_iterations
+
+#   env: TESTDIAG_LOGPARSE_MAX_FEEDBACKS
+logparse_max_feedbacks         = 2
+
+#   env: TESTDIAG_HYPOTHESIZE_MAX_FEEDBACKS
+hypothesize_max_feedbacks      = 2
+
+#   env: TESTDIAG_DEEPINSPECT_MAX_FEEDBACKS
+deepinspect_max_feedbacks      = 1
+
+# Tool calls allowed within one DEEPINSPECT attempt (one hypothesis, one try).
+#   env: TESTDIAG_DEEPINSPECT_MAX_TOOL_ITERATIONS
+deepinspect_max_tool_iterations = 50
+
+#   env: TESTDIAG_COMBINE_MAX_FEEDBACKS
+combine_max_feedbacks          = 2
