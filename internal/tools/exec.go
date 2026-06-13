@@ -44,6 +44,15 @@ type Confirmer func(language, script string) bool
 var (
 	confirmMu sync.Mutex
 	confirmFn Confirmer = interactiveConfirm
+
+	// stdinLineFn is the function used to read a line during the run_script
+	// confirmation prompt. The default reads directly from os.Stdin; main
+	// replaces it via SetStdinReader with ic.ConfirmLine so that a single
+	// goroutine owns all stdin reads and the interrupt controller can coordinate.
+	stdinLineFn = func() string {
+		line, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+		return line
+	}
 )
 
 // SetConfirmer replaces the approval policy used by run_script. main wires this
@@ -58,14 +67,18 @@ func SetConfirmer(c Confirmer) {
 	confirmFn = c
 }
 
-// stdinReader is a single shared buffered reader over stdin. A fresh
-// bufio.Reader per prompt could swallow bytes already buffered from the
-// terminal, so we keep one for the life of the process.
-var stdinReader = bufio.NewReader(os.Stdin)
+// SetStdinReader replaces the function that reads a line during run_script
+// confirmation prompts. Pass ic.ConfirmLine to route stdin through the
+// interrupt controller so that only one goroutine reads os.Stdin.
+func SetStdinReader(fn func() string) {
+	confirmMu.Lock()
+	stdinLineFn = fn
+	confirmMu.Unlock()
+}
 
 // interactiveConfirm shows the script on stderr and reads a 1 (yes) / 2 (no)
-// answer from stdin. Anything other than "1" is treated as a decline, so an
-// EOF or a stray keystroke fails safe.
+// answer via stdinLineFn. Anything other than "1" is treated as a decline, so
+// an EOF or a stray keystroke fails safe.
 func interactiveConfirm(language, script string) bool {
 	fmt.Fprintf(os.Stderr, "\n┌─ The agent wants to run a %s script ─────────────────────────\n", language)
 	for _, line := range strings.Split(strings.TrimRight(script, "\n"), "\n") {
@@ -74,8 +87,12 @@ func interactiveConfirm(language, script string) bool {
 	fmt.Fprintf(os.Stderr, "└──────────────────────────────────────────────────────────────\n")
 	fmt.Fprintf(os.Stderr, "Run it? [1 = Yes, 2 = No]: ")
 
-	line, err := stdinReader.ReadString('\n')
-	if err != nil && line == "" {
+	confirmMu.Lock()
+	readLine := stdinLineFn
+	confirmMu.Unlock()
+
+	line := readLine()
+	if strings.TrimSpace(line) == "" {
 		fmt.Fprintln(os.Stderr, "(no input — declined)")
 		return false
 	}

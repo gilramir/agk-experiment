@@ -123,10 +123,13 @@ type Pipeline struct {
 }
 
 // New builds the full pipeline. verbose enables per-stage progress output.
-func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, background string, verbose bool) *Pipeline {
+// drainInterrupt, if non-nil, is called before each DEEPINSPECT attempt to
+// discard queued operator messages that arrived between hypothesis runs; it is
+// the InterruptController.Drain method wired in by main.
+func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, background string, verbose bool, drainInterrupt func()) *Pipeline {
 	sc := &cfg.StageConfig
 
-	diagnoser := diagnose.New(ws, spec.DeepInspect.LLM, background, sc.DeepInspectMaxToolIterations, cfg.Workspace.Mapper)
+	diagnoser := diagnose.New(ws, spec.DeepInspect.LLM, background, sc.DeepInspectMaxToolIterations, cfg.Workspace.Mapper, drainInterrupt)
 
 	// Build feedback checkers for each stage.
 	var lpFB, hFB, diFB, cFB *feedbackChecker

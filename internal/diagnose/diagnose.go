@@ -55,15 +55,22 @@ type Diagnoser struct {
 	llm               config.LLMSpec
 	background        string // contents of TEST_AGENT.md
 	maxToolIterations int
-	mapper            string // path to test→source mapper executable; may be empty
+	mapper            string   // path to test→source mapper executable; may be empty
+	drainFn           func()   // called at the start of each Diagnose(); may be nil
 }
 
 // New creates a Diagnoser. llm is the LLM assigned to the DEEPINSPECT stage;
 // background is the TEST_AGENT.md content (may be "");
 // maxToolIterations caps the tool-calling loop per attempt;
-// mapper is the optional path to the test→source mapping executable.
-func New(ws *workspace.Workspace, llm config.LLMSpec, background string, maxToolIterations int, mapper string) *Diagnoser {
-	return &Diagnoser{ws: ws, llm: llm, background: background, maxToolIterations: maxToolIterations, mapper: mapper}
+// mapper is the optional path to the test→source mapping executable;
+// drainFn, if non-nil, is called before each attempt to discard any queued
+// operator messages that arrived between hypothesis runs.
+func New(ws *workspace.Workspace, llm config.LLMSpec, background string, maxToolIterations int, mapper string, drainFn func()) *Diagnoser {
+	return &Diagnoser{
+		ws: ws, llm: llm, background: background,
+		maxToolIterations: maxToolIterations, mapper: mapper,
+		drainFn: drainFn,
+	}
 }
 
 // Diagnose runs one DEEPINSPECT attempt for one hypothesis. When input.PrevResult
@@ -72,6 +79,10 @@ func New(ws *workspace.Workspace, llm config.LLMSpec, background string, maxTool
 // knows exactly what to improve. Each call builds a fresh agent (memory
 // disabled), so prior runs have no effect on this one.
 func (d *Diagnoser) Diagnose(ctx context.Context, input DiagnoseInput) (Result, error) {
+	if d.drainFn != nil {
+		d.drainFn()
+	}
+
 	m, err := mapping.MapTestToSource(d.mapper, d.ws.Root(), input.Test)
 	if err != nil {
 		// Mapper failure is non-fatal: warn and let the agent find the file itself.

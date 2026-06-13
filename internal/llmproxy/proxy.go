@@ -63,6 +63,12 @@ type Options struct {
 	// round-trips and tell a slow LLM call from a running tool. Debug supersedes
 	// it (the full log already shows everything).
 	Verbose bool
+	// Interrupt, if non-nil, enables operator chat mode: when the operator types
+	// a line into stdin, the next outgoing LLM request is intercepted and the
+	// line is injected as a user message. The loop continues until the LLM calls
+	// a tool (normal flow resumes) or the operator accepts a text reply as the
+	// final output. Only set this on the DEEPINSPECT proxy.
+	Interrupt *InterruptController
 }
 
 // Proxy is a running normalizing reverse proxy. Close it when done.
@@ -141,9 +147,19 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 	if err != nil {
 		return nil, fmt.Errorf("starting proxy listener: %w", err)
 	}
+	var handler http.Handler = rp
+	if opts.Interrupt != nil {
+		handler = &chatHandler{
+			rp:        rp,
+			upstream:  target,
+			tools:     openAITools,
+			normalize: normalize,
+			interrupt: opts.Interrupt,
+		}
+	}
 	p := &Proxy{
 		listener: ln,
-		server:   &http.Server{Handler: rp},
+		server:   &http.Server{Handler: handler},
 		baseURL:  fmt.Sprintf("http://%s", ln.Addr().String()),
 	}
 	go p.server.Serve(ln)

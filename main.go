@@ -141,9 +141,15 @@ func run() error {
 	deepinspectFBLLM := fallbackLLM(cfg, config.StageDeepInspectFeedback, deepinspectLLM)
 	combineFBLLM := fallbackLLM(cfg, config.StageCombineFeedback, combineLLM)
 
+	// The interrupt controller is the sole reader of os.Stdin. It muxes lines
+	// between run_script confirmation prompts and DEEPINSPECT operator chat.
+	ic := llmproxy.NewInterruptController()
+	ic.WatchStdin()
+	tools.SetStdinReader(ic.ConfirmLine)
+
 	// Front each LLM with the in-process normalizing proxy. Stages sharing the
 	// same (endpoint, tool set) reuse one proxy instance.
-	pm := newProxyManager(cfg.Proxy, opts.Verbose)
+	pm := newProxyManager(cfg.Proxy, opts.Verbose, ic)
 	defer pm.Close()
 	if pm.enabled() {
 		var deepTools []llmproxy.Tool
@@ -209,7 +215,7 @@ func run() error {
 			FeedbackLLM: combineFBLLM,
 		},
 	}
-	pl := pipeline.New(cfg, ws, spec, background, opts.Verbose)
+	pl := pipeline.New(cfg, ws, spec, background, opts.Verbose, ic.Drain)
 
 	fmt.Printf("Found %d failed test(s). Workspace: %s\n", len(failures), ws.Root())
 	fmt.Printf("Pipeline: %v\n", pl.States())
@@ -277,14 +283,15 @@ func process(ctx context.Context, pl *pipeline.Pipeline, failures []jenkins.Fail
 // proxyManager starts at most one normalizing LLM proxy per distinct
 // (endpoint, advertised tool set) and rewrites each stage LLM's BaseURL.
 type proxyManager struct {
-	cfg     config.Proxy
-	verbose bool
-	byKey   map[string]*llmproxy.Proxy
-	proxies []*llmproxy.Proxy
+	cfg       config.Proxy
+	verbose   bool
+	interrupt *llmproxy.InterruptController
+	byKey     map[string]*llmproxy.Proxy
+	proxies   []*llmproxy.Proxy
 }
 
-func newProxyManager(cfg config.Proxy, verbose bool) *proxyManager {
-	return &proxyManager{cfg: cfg, verbose: verbose, byKey: map[string]*llmproxy.Proxy{}}
+func newProxyManager(cfg config.Proxy, verbose bool, ic *llmproxy.InterruptController) *proxyManager {
+	return &proxyManager{cfg: cfg, verbose: verbose, interrupt: ic, byKey: map[string]*llmproxy.Proxy{}}
 }
 
 func (m *proxyManager) enabled() bool {
@@ -295,11 +302,16 @@ func (m *proxyManager) front(stage string, spec config.LLMSpec, proxyTools []llm
 	key := spec.BaseURL + "\x00" + toolSig(proxyTools)
 	px, ok := m.byKey[key]
 	if !ok {
+		var ic *llmproxy.InterruptController
+		if stage == "deepinspect" {
+			ic = m.interrupt
+		}
 		p, err := llmproxy.Start(spec.BaseURL, llmproxy.Options{
 			Tools:     proxyTools,
 			Normalize: m.cfg.NormalizeToolCalls,
 			Debug:     m.cfg.Debug,
 			Verbose:   m.verbose,
+			Interrupt: ic,
 		})
 		if err != nil {
 			return spec, fmt.Errorf("starting LLM proxy for %s: %w", stage, err)
