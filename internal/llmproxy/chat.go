@@ -29,7 +29,19 @@ type chatHandler struct {
 
 func (h *chatHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if isChatCompletions(r.URL.Path) {
-		if msg, ok := h.interrupt.TakeNonBlocking(); ok {
+		if trigger, ok := h.interrupt.TakeNonBlocking(); ok {
+			msg := strings.TrimSpace(trigger)
+			if msg == "" {
+				// Empty Enter = pause signal: prompt for the actual message.
+				fmt.Fprintf(os.Stdout, "\n\033[1;97;41m DEEPINSPECT PAUSED \033[0m\nEnter your message (or press Enter to resume): ")
+				reply, ok := h.interrupt.ReadLine(r.Context())
+				if !ok || strings.TrimSpace(reply) == "" {
+					fmt.Fprintf(os.Stdout, "[resuming]\n\n")
+					h.rp.ServeHTTP(w, r) // body not yet consumed; normal flow
+					return
+				}
+				msg = strings.TrimSpace(reply)
+			}
 			h.runChatLoop(w, r, msg)
 			return
 		}
