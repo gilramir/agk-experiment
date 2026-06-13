@@ -20,6 +20,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/gilbertr/testdiag/internal/config"
@@ -118,6 +119,7 @@ type PipelineSpec struct {
 type Pipeline struct {
 	stages     []Stage
 	stateNames []State // for display
+	verbose    bool
 }
 
 // New builds the full pipeline. verbose enables per-stage progress output.
@@ -166,6 +168,7 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 			newCombineStage(ws, spec.Combine.LLM, cFB, sc.CombineMaxFeedbacks, verbose),
 		},
 		stateNames: names,
+		verbose:    verbose,
 	}
 }
 
@@ -182,6 +185,9 @@ func (p *Pipeline) Run(ctx context.Context, test jenkins.FailedTest) (FinalResul
 	for _, st := range p.stages {
 		if err := ctx.Err(); err != nil {
 			return FinalResult{}, err
+		}
+		if p.verbose {
+			fmt.Fprintf(os.Stdout, "\033[1;97;41m ENTERING %s \033[0m\n", st.Name())
 		}
 		if err := st.Run(ctx, sc); err != nil {
 			return FinalResult{}, fmt.Errorf("%s stage: %w", st.Name(), err)
