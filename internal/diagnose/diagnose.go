@@ -55,13 +55,15 @@ type Diagnoser struct {
 	llm               config.LLMSpec
 	background        string // contents of TEST_AGENT.md
 	maxToolIterations int
+	mapper            string // path to test→source mapper executable; may be empty
 }
 
 // New creates a Diagnoser. llm is the LLM assigned to the DEEPINSPECT stage;
 // background is the TEST_AGENT.md content (may be "");
-// maxToolIterations caps the tool-calling loop per attempt.
-func New(ws *workspace.Workspace, llm config.LLMSpec, background string, maxToolIterations int) *Diagnoser {
-	return &Diagnoser{ws: ws, llm: llm, background: background, maxToolIterations: maxToolIterations}
+// maxToolIterations caps the tool-calling loop per attempt;
+// mapper is the optional path to the test→source mapping executable.
+func New(ws *workspace.Workspace, llm config.LLMSpec, background string, maxToolIterations int, mapper string) *Diagnoser {
+	return &Diagnoser{ws: ws, llm: llm, background: background, maxToolIterations: maxToolIterations, mapper: mapper}
 }
 
 // Diagnose runs one DEEPINSPECT attempt for one hypothesis. When input.PrevResult
@@ -70,9 +72,11 @@ func New(ws *workspace.Workspace, llm config.LLMSpec, background string, maxTool
 // knows exactly what to improve. Each call builds a fresh agent (memory
 // disabled), so prior runs have no effect on this one.
 func (d *Diagnoser) Diagnose(ctx context.Context, input DiagnoseInput) (Result, error) {
-	m, err := mapping.MapTestToSource(d.ws.Root(), input.Test)
+	m, err := mapping.MapTestToSource(d.mapper, d.ws.Root(), input.Test)
 	if err != nil {
-		return Result{}, fmt.Errorf("mapping %s: %w", input.Test.FullName(), err)
+		// Mapper failure is non-fatal: warn and let the agent find the file itself.
+		fmt.Fprintf(os.Stderr, "warning: mapper failed for %s: %v\n", input.Test.FullName(), err)
+		m = mapping.Result{}
 	}
 
 	if _, err := d.prepareNotebook(input.Test, input.HypothesisIndex); err != nil {

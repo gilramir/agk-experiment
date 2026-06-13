@@ -124,7 +124,7 @@ type Pipeline struct {
 func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, background string, verbose bool) *Pipeline {
 	sc := &cfg.StageConfig
 
-	diagnoser := diagnose.New(ws, spec.DeepInspect.LLM, background, sc.DeepInspectMaxToolIterations)
+	diagnoser := diagnose.New(ws, spec.DeepInspect.LLM, background, sc.DeepInspectMaxToolIterations, cfg.Workspace.Mapper)
 
 	// Build feedback checkers for each stage.
 	var lpFB, hFB, diFB, cFB *feedbackChecker

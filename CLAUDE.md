@@ -151,10 +151,14 @@ The pipeline is sequential: fetch failures → run each failure through the stag
   tool results". No internal critique/revise loop — that is now handled externally by
   `deepInspectAllStage` + `feedbackChecker`.
 
-- **`internal/mapping`** — **STUB.** `MapTestToSource` returns an empty path; the
-  agent then finds the file itself via `list_directory`/`grep`. Implementing the
-  project-specific test→source mapping gives the agent a precise starting point.
-  Returning an empty `SourceFile` is a valid, safe outcome.
+- **`internal/mapping`** — `MapTestToSource(mapperPath, workspaceRoot string, test)
+  (Result, error)` runs the user-supplied mapper executable (`workspace.mapper` in
+  config / `TESTDIAG_MAPPER` env) with `test.FullName()` as the sole argument and
+  reads the source file path from its stdout. The subprocess runs with
+  `workspaceRoot` as its CWD. When `mapperPath` is empty, or the mapper prints
+  nothing, an empty `Result` is returned with no error. A non-zero exit returns an
+  error, which `Diagnoser.Diagnose` treats as a soft warning — it logs to stderr
+  and continues with an empty mapping so the agent can locate the file itself.
 
 - **`internal/report`** — writes one Markdown root-cause report per test into the
   output dir. Takes `pipeline.FinalResult`; renders the COMBINE output as the main

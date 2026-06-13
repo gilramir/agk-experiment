@@ -98,6 +98,14 @@ type Workspace struct {
 	// components could have caused the failure. Optional — if empty or the file
 	// does not exist, HYPOTHESIZE works from the investigation brief alone.
 	ArchitectureDoc string `toml:"architecture_doc"`
+	// Mapper is the path to an executable that translates a Jenkins test name
+	// into a workspace-relative source file path. It is called as:
+	//   <mapper> "<test.FullName()>"
+	// and must print the source file path on stdout (trailing newline is
+	// trimmed). The subprocess runs with the workspace root as its working
+	// directory. Optional — if empty, DEEPINSPECT locates the file itself via
+	// the directory/grep tools.
+	Mapper string `toml:"mapper"`
 }
 
 // StageConfig holds per-stage tuning knobs. Each field controls a specific
@@ -264,6 +272,7 @@ func applyEnvOverrides(cfg *Config) {
 
 	setStr(&cfg.Workspace.Root, "TESTDIAG_WORKSPACE_ROOT")
 	setStr(&cfg.Workspace.ArchitectureDoc, "TESTDIAG_ARCHITECTURE_DOC")
+	setStr(&cfg.Workspace.Mapper, "TESTDIAG_MAPPER")
 
 	setStr(&cfg.Output.Dir, "TESTDIAG_OUTPUT_DIR")
 

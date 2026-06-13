@@ -102,6 +102,16 @@ root = ""
 #   env: TESTDIAG_ARCHITECTURE_DOC
 architecture_doc = ""   # e.g. "docs/architecture.md"
 
+# Optional: path to an executable that maps a Jenkins test name to its
+# workspace-relative source file. Called as:
+#   <mapper> "<suite.ClassName.methodName>"
+# Must print the source file path on stdout (e.g. "src/foo/FooTest.java").
+# The subprocess runs with the workspace root as its working directory.
+# When empty or the mapper returns nothing, DEEPINSPECT locates the file
+# itself via the directory/grep tools.
+#   env: TESTDIAG_MAPPER
+mapper = ""   # e.g. "/usr/local/bin/my-test-mapper" or "scripts/map_test.sh"
+
 [output]
 #   env: TESTDIAG_OUTPUT_DIR
 dir = "test-diagnosis"   # one Markdown report per failed test is written here

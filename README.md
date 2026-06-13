@@ -192,15 +192,31 @@ testdiag https://jenkins.example.com/job/myapp/1234/ LoginTest
 testdiag -v https://jenkins.example.com/job/myapp/1234/
 ```
 
-## Placeholders
+## Test → source-file mapping
 
-These are intentionally left for you to complete:
+DEEPINSPECT works better when it knows which source file the failing test lives
+in. You can supply a mapper executable that performs this translation:
 
-- **Test → source-file mapping** — `internal/mapping/mapping.go`
-  (`MapTestToSource`). This is project-specific (language, repo layout,
-  package→path rules). It currently returns an empty path, which is safe: the
-  DEEPINSPECT agent will locate the file itself via `list_directory`/`grep`.
-  Implement it to give the agent a precise starting point.
+```toml
+[workspace]
+mapper = "/path/to/my-test-mapper"   # or TESTDIAG_MAPPER env var
+```
+
+testdiag calls it as:
+
+```sh
+my-test-mapper "com.example.FooTest.testBar"
+```
+
+The executable should print the workspace-relative source file path on stdout
+(e.g. `src/main/java/com/example/FooTest.java`) and exit 0. The subprocess runs
+with the workspace root as its working directory, so relative paths and workspace
+files are accessible. Anything the mapper writes to stderr is passed through.
+
+When `mapper` is empty, the test returns nothing, or the mapper exits non-zero,
+DEEPINSPECT receives no source-file hint and locates the file itself via the
+`list_directory`/`grep` tools. A mapper failure prints a warning but does not
+abort the diagnosis.
 
 ## How tool calls reach the model
 
