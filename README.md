@@ -25,6 +25,23 @@ Given a Jenkins build URL:
    → MEMORIZE
    ```
 
+   | Stage | Goal | Tools |
+   |-------|------|-------|
+   | DOWNLOAD | Fetch and save the failure log | — |
+   | LOGPARSE | Distil log into an investigation brief | — (log given inline) |
+   | FEEDBACK | Accept brief or return critique for retry | — |
+   | HYPOTHESIZE | Rank 1–N nondeterminism hypotheses from brief + arch doc | — |
+   | FEEDBACK | Accept hypothesis list or return critique | — |
+   | PLANINSPECTION × N | Breadth-first workspace survey → annotated file list for DEEPINSPECT | workspace source tools |
+   | FEEDBACK | Accept plan or return critique | — |
+   | DEEPINSPECT × N | Confirm/refute hypothesis via source inspection | workspace source tools |
+   | FEEDBACK | Accept result or return critique | — |
+   | COMBINE | Select best-supported root cause from all outcomes | — |
+   | FEEDBACK | Accept synthesis or return critique | — |
+   | MEMORIZE | Extract durable codebase facts → `.testdiag/memory.md` | — |
+
+   *Workspace source tools* = `read_file`, `list_directory`, `count_lines`, `read_lines`, `grep`, `search_repo`, `find_files`, `run_script`, `notebook`. The raw-log tools (`read_log`, `grep_log`) are withheld from both PLANINSPECTION and DEEPINSPECT; those stages work from the brief alone.
+
    - **DOWNLOAD** — saves the test's full failure log under `.testdiag/logs/`.
    - **LOGPARSE** — one tool-less LLM pass over that log produces an
      **investigation brief** (`.testdiag/handoff/<test>.logparse.md`): the first
@@ -105,17 +122,15 @@ context window.
 | `grep` | Find matching lines (with numbers) in a file |
 | `search_repo` | Recursive grep across the tree |
 | `find_files` | Locate files by glob / substring |
-| `git_blame` | Blame a jailed path |
-| `git_log` | History for a jailed path (pager off, byte-capped) |
-| `read_log` | Read the saved failure log (with `tail`) — **withheld from DEEPINSPECT** |
-| `grep_log` | Search the failure log (with context lines) — **withheld from DEEPINSPECT** |
+| `read_log` | Read the saved failure log (with `tail`) — **withheld from PLANINSPECTION and DEEPINSPECT** |
+| `grep_log` | Search the failure log (with context lines) — **withheld from PLANINSPECTION and DEEPINSPECT** |
 | `run_script` | Write + run a shell/Python script — **only after operator approval** |
 | `notebook` | Per-hypothesis Markdown scratchpad (`append` / `read`) the agent uses as working memory |
 
 The two log tools are not advertised to PLANINSPECTION or DEEPINSPECT and are
 hard-disabled while either runs, so neither can re-read the raw log — both work from
-the brief. LOGPARSE, HYPOTHESIZE, FEEDBACK, and COMBINE use no tools (their inputs
-are given inline).
+the brief. All other stages (LOGPARSE, HYPOTHESIZE, FEEDBACK, COMBINE, MEMORIZE) use
+no tools; their inputs are given inline.
 
 The prompt steers the model to `count_lines`/`grep`/`read_lines` rather than
 dumping whole files, so large sources stay within context.
@@ -235,8 +250,10 @@ testdiag --output ./reports https://jenkins.example.com/job/myapp/1234/testRepor
 testdiag https://jenkins.example.com/job/myapp/1234/ LoginTest
 
 # -d/--debug logs the full LLM conversation; -v/--verbose logs stage handoffs
-# and tool progress.
+# and tool progress; -p/--pause prints each handoff and waits for ENTER before
+# the next stage (useful for reviewing intermediate results).
 testdiag -v https://jenkins.example.com/job/myapp/1234/
+testdiag -p https://jenkins.example.com/job/myapp/1234/
 ```
 
 ## Test → source-file mapping
