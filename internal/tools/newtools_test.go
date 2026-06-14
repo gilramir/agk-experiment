@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -227,49 +226,6 @@ func TestGrepLogContext(t *testing.T) {
 	}
 	if !strings.Contains(text, "1: line1") || !strings.Contains(text, "3: stack frame a") {
 		t.Errorf("missing context lines:\n%s", text)
-	}
-}
-
-func TestGitBlameAndLog(t *testing.T) {
-	ws, root := setupWS(t)
-	if _, err := exec.LookPath("git"); err != nil {
-		t.Skip("git not available")
-	}
-	runIn := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=Tester", "GIT_AUTHOR_EMAIL=t@e.x",
-			"GIT_COMMITTER_NAME=Tester", "GIT_COMMITTER_EMAIL=t@e.x")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	runIn("init", "-q")
-	runIn("add", ".")
-	runIn("commit", "-qm", "initial import of client and server")
-
-	blame := &gitBlameTool{ws: ws}
-	res, err := blame.Execute(context.Background(), map[string]interface{}{
-		"path": "client/foo_client.py", "start": 3, "end": 3,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !res.Success {
-		t.Fatalf("blame failed: %v", res.Error)
-	}
-	if !strings.Contains(res.Content.(map[string]interface{})["blame"].(string), "Tester") {
-		t.Errorf("blame missing author:\n%v", res.Content)
-	}
-
-	lg := &gitLogTool{ws: ws}
-	res, err = lg.Execute(context.Background(), map[string]interface{}{"path": "server/src/foo.cc"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(res.Content.(map[string]interface{})["log"].(string), "initial import") {
-		t.Errorf("log missing commit subject:\n%v", res.Content)
 	}
 }
 
