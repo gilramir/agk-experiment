@@ -31,13 +31,14 @@ type logParseStage struct {
 	feedback     *feedbackChecker // nil when feedback is disabled
 	maxFeedbacks int
 	verbose      bool
+	pauseFn      func() // non-nil when -p is set; called after each handoff print
 }
 
 // newLogParseStage constructs the stage. fb is nil when feedback is disabled
 // (maxFeedbacks=0 or no feedback LLM configured); both are set together by
 // pipeline.New before calling this.
-func newLogParseStage(ws *workspace.Workspace, llm config.LLMSpec, fb *feedbackChecker, maxFeedbacks int, verbose bool) *logParseStage {
-	return &logParseStage{ws: ws, llm: llm, feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose}
+func newLogParseStage(ws *workspace.Workspace, llm config.LLMSpec, fb *feedbackChecker, maxFeedbacks int, verbose bool, pauseFn func()) *logParseStage {
+	return &logParseStage{ws: ws, llm: llm, feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose, pauseFn: pauseFn}
 }
 
 func (s *logParseStage) Name() State { return StateLogParse }
@@ -105,9 +106,12 @@ func (s *logParseStage) saveBrief(sc *Context, brief string) error {
 	}
 	sc.LogParsePath = rel
 	sc.Brief = brief
-	if s.verbose {
+	if s.verbose || s.pauseFn != nil {
 		fmt.Fprintf(os.Stdout, "--- LOGPARSE handoff for %s ---\n%s\n--- end ---\n\n",
 			sc.Test.FullName(), strings.TrimSpace(brief))
+	}
+	if s.pauseFn != nil {
+		s.pauseFn()
 	}
 	return nil
 }

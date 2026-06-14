@@ -22,10 +22,11 @@ type deepInspectAllStage struct {
 	maxFeedbacks  int
 	resetCounter  func() // resets the proxy's per-run request counter; may be nil
 	verbose       bool
+	pauseFn       func() // non-nil when -p is set; called after each handoff print
 }
 
-func newDeepInspectAllStage(d *diagnose.Diagnoser, ws *workspace.Workspace, fb *feedbackChecker, maxFeedbacks int, resetCounter func(), verbose bool) *deepInspectAllStage {
-	return &deepInspectAllStage{d: d, ws: ws, feedback: fb, maxFeedbacks: maxFeedbacks, resetCounter: resetCounter, verbose: verbose}
+func newDeepInspectAllStage(d *diagnose.Diagnoser, ws *workspace.Workspace, fb *feedbackChecker, maxFeedbacks int, resetCounter func(), verbose bool, pauseFn func()) *deepInspectAllStage {
+	return &deepInspectAllStage{d: d, ws: ws, feedback: fb, maxFeedbacks: maxFeedbacks, resetCounter: resetCounter, verbose: verbose, pauseFn: pauseFn}
 }
 
 func (s *deepInspectAllStage) Name() State { return StateDeepInspect }
@@ -58,9 +59,12 @@ func (s *deepInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothe
 		s.resetCounter()
 	}
 
-	if s.verbose {
+	if s.verbose || s.pauseFn != nil {
 		fmt.Fprintf(os.Stdout, "--- handoff to DEEPINSPECT h%d/%d for %s ---\n%s\n--- end ---\n\n",
 			h.Index, len(sc.Hypotheses), sc.Test.FullName(), h.Text())
+	}
+	if s.pauseFn != nil {
+		s.pauseFn()
 	}
 
 	var (
@@ -146,9 +150,12 @@ func (s *deepInspectAllStage) save(sc *Context, h Hypothesis, out DeepInspectOut
 		if s.verbose {
 			fmt.Fprintf(os.Stderr, "  DEEPINSPECT h%d: could not write handoff file: %v\n", h.Index, err)
 		}
-	} else if s.verbose {
+	} else if s.verbose || s.pauseFn != nil {
 		fmt.Fprintf(os.Stdout, "--- DEEPINSPECT h%d output for %s ---\n%s\n--- end ---\n\n",
 			h.Index, sc.Test.FullName(), strings.TrimSpace(out.Content))
+	}
+	if s.pauseFn != nil {
+		s.pauseFn()
 	}
 	return out
 }

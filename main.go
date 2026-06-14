@@ -52,6 +52,7 @@ type options struct {
 	Output  string
 	Debug   bool
 	Verbose bool
+	Pause   bool
 	URL     string
 	Filters []string
 }
@@ -84,6 +85,10 @@ func run() error {
 	ap.Add(&argparse.Argument{
 		Switches: []string{"-v", "--verbose"},
 		Help:     "Log stage handoffs and tool progress to stderr",
+	})
+	ap.Add(&argparse.Argument{
+		Switches: []string{"-p", "--pause"},
+		Help:     "Pause after each stage handoff; implies printing the handoff even without -v",
 	})
 	ap.Add(&argparse.Argument{
 		Name: "url",
@@ -239,7 +244,15 @@ func run() error {
 			FeedbackLLM: combineFBLLM,
 		},
 	}
-	pl := pipeline.New(cfg, ws, spec, background, memory, opts.Verbose, ic.Drain)
+	var pauseFn func()
+	if opts.Pause {
+		pauseFn = func() {
+			fmt.Fprint(os.Stdout, "Press <ENTER> to continue...")
+			ic.ConfirmLine()
+			fmt.Fprintln(os.Stdout)
+		}
+	}
+	pl := pipeline.New(cfg, ws, spec, background, memory, opts.Verbose, ic.Drain, pauseFn)
 	distiller := distill.New(ws, memorizeLLM)
 
 	fmt.Printf("Found %d failed test(s). Workspace: %s\n", len(failures), ws.Root())

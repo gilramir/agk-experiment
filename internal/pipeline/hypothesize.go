@@ -28,12 +28,13 @@ type hypothesizeStage struct {
 	feedback     *feedbackChecker // nil when disabled
 	maxFeedbacks int
 	verbose      bool
+	pauseFn      func() // non-nil when -p is set; called after each handoff print
 }
 
-func newHypothesizeStage(ws *workspace.Workspace, llm config.LLMSpec, archDocPath string, fb *feedbackChecker, maxFeedbacks int, verbose bool) *hypothesizeStage {
+func newHypothesizeStage(ws *workspace.Workspace, llm config.LLMSpec, archDocPath string, fb *feedbackChecker, maxFeedbacks int, verbose bool, pauseFn func()) *hypothesizeStage {
 	return &hypothesizeStage{
 		ws: ws, llm: llm, archDocPath: archDocPath,
-		feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose,
+		feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose, pauseFn: pauseFn,
 	}
 }
 
@@ -118,9 +119,12 @@ func (s *hypothesizeStage) save(sc *Context, content string, hypotheses []Hypoth
 	}
 	sc.HypothesisPath = filepath.ToSlash(rel)
 	sc.Hypotheses = hypotheses
-	if s.verbose {
+	if s.verbose || s.pauseFn != nil {
 		fmt.Fprintf(os.Stdout, "--- HYPOTHESIZE handoff for %s ---\n%s\n--- end of handoff ---\n\n",
 			sc.Test.FullName(), strings.TrimSpace(content))
+	}
+	if s.pauseFn != nil {
+		s.pauseFn()
 	}
 	return nil
 }

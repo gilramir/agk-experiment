@@ -158,7 +158,11 @@ type Pipeline struct {
 // discard queued operator messages that arrived between hypothesis runs; it is
 // the InterruptController.Drain method wired in by main.
 // memory is the contents of .testdiag/memory.md from prior runs (may be "").
-func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, background, memory string, verbose bool, drainInterrupt func()) *Pipeline {
+// pauseFn, if non-nil, is called after every handoff print regardless of
+// verbose; it should print "Press <ENTER> to continue..." and block until the
+// user presses ENTER. When pauseFn is non-nil the handoff is printed even if
+// verbose is false.
+func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, background, memory string, verbose bool, drainInterrupt func(), pauseFn func()) *Pipeline {
 	sc := &cfg.StageConfig
 
 	plnr := planner.New(ws, spec.Plan.LLM, background, memory, sc.PlanMaxToolIterations, cfg.Workspace.Mapper)
@@ -205,11 +209,11 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 	return &Pipeline{
 		stages: []Stage{
 			&downloadStage{ws: ws},
-			newLogParseStage(ws, spec.LogParse.LLM, lpFB, sc.LogParseMaxFeedbacks, verbose),
-			newHypothesizeStage(ws, spec.Hypothesize.LLM, archDoc, hFB, sc.HypothesizeMaxFeedbacks, verbose),
-			newPlanInspectAllStage(plnr, ws, archDoc, planFB, sc.PlanMaxFeedbacks, spec.Plan.ResetCounter, verbose),
-			newDeepInspectAllStage(diagnoser, ws, diFB, sc.DeepInspectMaxFeedbacks, spec.DeepInspect.ResetCounter, verbose),
-			newCombineStage(ws, spec.Combine.LLM, cFB, sc.CombineMaxFeedbacks, verbose),
+			newLogParseStage(ws, spec.LogParse.LLM, lpFB, sc.LogParseMaxFeedbacks, verbose, pauseFn),
+			newHypothesizeStage(ws, spec.Hypothesize.LLM, archDoc, hFB, sc.HypothesizeMaxFeedbacks, verbose, pauseFn),
+			newPlanInspectAllStage(plnr, ws, archDoc, planFB, sc.PlanMaxFeedbacks, spec.Plan.ResetCounter, verbose, pauseFn),
+			newDeepInspectAllStage(diagnoser, ws, diFB, sc.DeepInspectMaxFeedbacks, spec.DeepInspect.ResetCounter, verbose, pauseFn),
+			newCombineStage(ws, spec.Combine.LLM, cFB, sc.CombineMaxFeedbacks, verbose, pauseFn),
 		},
 		stateNames: names,
 		verbose:    verbose,

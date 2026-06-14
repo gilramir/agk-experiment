@@ -24,10 +24,11 @@ type combineStage struct {
 	feedback     *feedbackChecker
 	maxFeedbacks int
 	verbose      bool
+	pauseFn      func() // non-nil when -p is set; called after each handoff print
 }
 
-func newCombineStage(ws *workspace.Workspace, llm config.LLMSpec, fb *feedbackChecker, maxFeedbacks int, verbose bool) *combineStage {
-	return &combineStage{ws: ws, llm: llm, feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose}
+func newCombineStage(ws *workspace.Workspace, llm config.LLMSpec, fb *feedbackChecker, maxFeedbacks int, verbose bool, pauseFn func()) *combineStage {
+	return &combineStage{ws: ws, llm: llm, feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose, pauseFn: pauseFn}
 }
 
 func (s *combineStage) Name() State { return StateCombine }
@@ -98,9 +99,12 @@ func (s *combineStage) save(sc *Context, content string) error {
 	}
 	sc.CombinePath = filepath.ToSlash(rel)
 	sc.Combined = content
-	if s.verbose {
+	if s.verbose || s.pauseFn != nil {
 		fmt.Fprintf(os.Stdout, "--- COMBINE output for %s ---\n%s\n--- end ---\n\n",
 			sc.Test.FullName(), strings.TrimSpace(content))
+	}
+	if s.pauseFn != nil {
+		s.pauseFn()
 	}
 	return nil
 }
