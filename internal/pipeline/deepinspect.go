@@ -16,15 +16,16 @@ import (
 // exhausted) is recorded as a failed outcome but does NOT stop the pipeline —
 // the COMBINE stage will work with whatever results are available.
 type deepInspectAllStage struct {
-	d            *diagnose.Diagnoser
-	ws           *workspace.Workspace
-	feedback     *feedbackChecker // nil when DEEPINSPECT feedback is disabled
-	maxFeedbacks int
-	verbose      bool
+	d             *diagnose.Diagnoser
+	ws            *workspace.Workspace
+	feedback      *feedbackChecker // nil when DEEPINSPECT feedback is disabled
+	maxFeedbacks  int
+	resetCounter  func() // resets the proxy's per-run request counter; may be nil
+	verbose       bool
 }
 
-func newDeepInspectAllStage(d *diagnose.Diagnoser, ws *workspace.Workspace, fb *feedbackChecker, maxFeedbacks int, verbose bool) *deepInspectAllStage {
-	return &deepInspectAllStage{d: d, ws: ws, feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose}
+func newDeepInspectAllStage(d *diagnose.Diagnoser, ws *workspace.Workspace, fb *feedbackChecker, maxFeedbacks int, resetCounter func(), verbose bool) *deepInspectAllStage {
+	return &deepInspectAllStage{d: d, ws: ws, feedback: fb, maxFeedbacks: maxFeedbacks, resetCounter: resetCounter, verbose: verbose}
 }
 
 func (s *deepInspectAllStage) Name() State { return StateDeepInspect }
@@ -52,6 +53,10 @@ func (s *deepInspectAllStage) Run(ctx context.Context, sc *Context) error {
 // returns an error; failures are captured in the returned outcome.
 func (s *deepInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothesis, planContent string) DeepInspectOutcome {
 	out := DeepInspectOutcome{Hypothesis: h}
+
+	if s.resetCounter != nil {
+		s.resetCounter()
+	}
 
 	if s.verbose {
 		fmt.Fprintf(os.Stdout, "--- handoff to DEEPINSPECT h%d/%d for %s ---\n%s\n--- end ---\n\n",

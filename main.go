@@ -225,12 +225,14 @@ func run() error {
 			FeedbackLLM: hypothesizeFBLLM,
 		},
 		Plan: pipeline.StageSpec{
-			LLM:         planLLM,
-			FeedbackLLM: planFBLLM,
+			LLM:          planLLM,
+			FeedbackLLM:  planFBLLM,
+			ResetCounter: pm.resetFn("planinspection"),
 		},
 		DeepInspect: pipeline.StageSpec{
-			LLM:         deepinspectLLM,
-			FeedbackLLM: deepinspectFBLLM,
+			LLM:          deepinspectLLM,
+			FeedbackLLM:  deepinspectFBLLM,
+			ResetCounter: pm.resetFn("deepinspect"),
 		},
 		Combine: pipeline.StageSpec{
 			LLM:         combineLLM,
@@ -320,11 +322,28 @@ type proxyManager struct {
 	verbose   bool
 	interrupt *llmproxy.InterruptController
 	byKey     map[string]*llmproxy.Proxy
+	byStage   map[string]*llmproxy.Proxy // stage name → proxy (for resetFn)
 	proxies   []*llmproxy.Proxy
 }
 
 func newProxyManager(cfg config.Proxy, verbose bool, ic *llmproxy.InterruptController) *proxyManager {
-	return &proxyManager{cfg: cfg, verbose: verbose, interrupt: ic, byKey: map[string]*llmproxy.Proxy{}}
+	return &proxyManager{
+		cfg:       cfg,
+		verbose:   verbose,
+		interrupt: ic,
+		byKey:     map[string]*llmproxy.Proxy{},
+		byStage:   map[string]*llmproxy.Proxy{},
+	}
+}
+
+// resetFn returns a function that resets the request counter on the proxy
+// serving the given stage. Returns a no-op if the proxy is unknown (e.g.
+// when the proxy is disabled).
+func (m *proxyManager) resetFn(stage string) func() {
+	if px, ok := m.byStage[stage]; ok {
+		return px.ResetCounter
+	}
+	return func() {}
 }
 
 func (m *proxyManager) enabled() bool {
@@ -360,6 +379,7 @@ func (m *proxyManager) front(stage string, spec config.LLMSpec, proxyTools []llm
 		fmt.Printf("LLM proxy active: %s -> %s (normalize=%t, tools=%d, debug=%t)\n",
 			px.BaseURL(), spec.BaseURL, m.cfg.NormalizeToolCalls, len(proxyTools), m.cfg.Debug)
 	}
+	m.byStage[stage] = px
 	spec.BaseURL = px.BaseURL()
 	return spec, nil
 }

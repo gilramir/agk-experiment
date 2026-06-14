@@ -126,9 +126,14 @@ type Stage interface {
 
 // StageSpec pairs a primary LLM with the LLM used for its FEEDBACK gate.
 // FeedbackLLM may equal LLM when no explicit override is configured.
+// ResetCounter, if non-nil, is called at the start of each agent run to reset
+// the proxy's per-run request counter (so [llm] heartbeats show #1, #2, …
+// within each hypothesis rather than a monotone total). Only meaningful for
+// tool-using stages (PLANINSPECTION, DEEPINSPECT).
 type StageSpec struct {
-	LLM         config.LLMSpec
-	FeedbackLLM config.LLMSpec
+	LLM          config.LLMSpec
+	FeedbackLLM  config.LLMSpec
+	ResetCounter func()
 }
 
 // PipelineSpec names the LLMs for every stage. The feedbacks for each stage
@@ -202,8 +207,8 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 			&downloadStage{ws: ws},
 			newLogParseStage(ws, spec.LogParse.LLM, lpFB, sc.LogParseMaxFeedbacks, verbose),
 			newHypothesizeStage(ws, spec.Hypothesize.LLM, archDoc, hFB, sc.HypothesizeMaxFeedbacks, verbose),
-			newPlanInspectAllStage(plnr, ws, archDoc, planFB, sc.PlanMaxFeedbacks, verbose),
-			newDeepInspectAllStage(diagnoser, ws, diFB, sc.DeepInspectMaxFeedbacks, verbose),
+			newPlanInspectAllStage(plnr, ws, archDoc, planFB, sc.PlanMaxFeedbacks, spec.Plan.ResetCounter, verbose),
+			newDeepInspectAllStage(diagnoser, ws, diFB, sc.DeepInspectMaxFeedbacks, spec.DeepInspect.ResetCounter, verbose),
 			newCombineStage(ws, spec.Combine.LLM, cFB, sc.CombineMaxFeedbacks, verbose),
 		},
 		stateNames: names,

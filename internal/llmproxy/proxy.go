@@ -73,10 +73,16 @@ type Options struct {
 
 // Proxy is a running normalizing reverse proxy. Close it when done.
 type Proxy struct {
-	listener net.Listener
-	server   *http.Server
-	baseURL  string
+	listener   net.Listener
+	server     *http.Server
+	baseURL    string
+	reqCounter atomic.Uint64
 }
+
+// ResetCounter resets the per-proxy request counter to zero. Call this at the
+// start of each agent run so the [llm] heartbeat lines show per-run sequence
+// numbers rather than a monotone counter spanning all runs on this proxy.
+func (p *Proxy) ResetCounter() { p.reqCounter.Store(0) }
 
 // debugIDKey tags a request's context with its debug sequence number so the
 // response logged later can be correlated with the request that produced it.
@@ -98,7 +104,10 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 	debug := opts.Debug
 	verbose := opts.Verbose
 	normalize := opts.Normalize
-	var reqCounter atomic.Uint64
+
+	// p is created before the Director closure so the closure can reference
+	// p.reqCounter, which main can reset between agent runs.
+	p := &Proxy{}
 
 	rp := &httputil.ReverseProxy{
 		Director: func(req *http.Request) {
@@ -128,7 +137,7 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 				scrubContinuationNudge(body)
 			}
 			if debug || heartbeat {
-				id := reqCounter.Add(1)
+				id := p.reqCounter.Add(1)
 				*req = *req.WithContext(context.WithValue(req.Context(), debugIDKey{}, id))
 				if debug {
 					logRequest(id, reqPath, body)
@@ -157,11 +166,9 @@ func Start(upstreamBaseURL string, opts Options) (*Proxy, error) {
 			interrupt: opts.Interrupt,
 		}
 	}
-	p := &Proxy{
-		listener: ln,
-		server:   &http.Server{Handler: handler},
-		baseURL:  fmt.Sprintf("http://%s", ln.Addr().String()),
-	}
+	p.listener = ln
+	p.server = &http.Server{Handler: handler}
+	p.baseURL = fmt.Sprintf("http://%s", ln.Addr().String())
 	go p.server.Serve(ln)
 	return p, nil
 }

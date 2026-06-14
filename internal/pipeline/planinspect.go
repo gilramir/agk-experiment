@@ -16,16 +16,17 @@ import (
 // outcome and does NOT stop the pipeline — DEEPINSPECT will work from the
 // brief alone for that hypothesis.
 type planInspectAllStage struct {
-	p            *planner.Planner
-	ws           *workspace.Workspace
-	archDocPath  string
-	feedback     *feedbackChecker
-	maxFeedbacks int
-	verbose      bool
+	p             *planner.Planner
+	ws            *workspace.Workspace
+	archDocPath   string
+	feedback      *feedbackChecker
+	maxFeedbacks  int
+	resetCounter  func() // resets the proxy's per-run request counter; may be nil
+	verbose       bool
 }
 
-func newPlanInspectAllStage(p *planner.Planner, ws *workspace.Workspace, archDocPath string, fb *feedbackChecker, maxFeedbacks int, verbose bool) *planInspectAllStage {
-	return &planInspectAllStage{p: p, ws: ws, archDocPath: archDocPath, feedback: fb, maxFeedbacks: maxFeedbacks, verbose: verbose}
+func newPlanInspectAllStage(p *planner.Planner, ws *workspace.Workspace, archDocPath string, fb *feedbackChecker, maxFeedbacks int, resetCounter func(), verbose bool) *planInspectAllStage {
+	return &planInspectAllStage{p: p, ws: ws, archDocPath: archDocPath, feedback: fb, maxFeedbacks: maxFeedbacks, resetCounter: resetCounter, verbose: verbose}
 }
 
 func (s *planInspectAllStage) Name() State { return StatePlanInspect }
@@ -47,6 +48,10 @@ func (s *planInspectAllStage) Run(ctx context.Context, sc *Context) error {
 
 func (s *planInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothesis, archDoc string) PlanInspectOutcome {
 	out := PlanInspectOutcome{Hypothesis: h}
+
+	if s.resetCounter != nil {
+		s.resetCounter()
+	}
 
 	if s.verbose {
 		fmt.Fprintf(os.Stdout, "--- handoff to PLANINSPECTION h%d/%d for %s ---\n%s\n--- end ---\n\n",
