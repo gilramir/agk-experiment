@@ -64,18 +64,18 @@ func (t *searchRepoTool) JSONSchema() map[string]interface{} {
 	return map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"pattern":     map[string]interface{}{"type": "string", "description": "RE2 regular expression to match against each line."},
-			"path":        map[string]interface{}{"type": "string", "description": "Workspace-relative directory to limit the search to. Defaults to the whole workspace ('.')."},
-			"include":     map[string]interface{}{"type": "string", "description": "Optional filename glob to restrict which files are searched (e.g. *.py or *Test.java)."},
-			"ignore_case": map[string]interface{}{"type": "boolean", "description": "Case-insensitive match (default false)."},
+			"regex":        map[string]interface{}{"type": "string", "description": "RE2 regular expression to match against each line."},
+			"path":         map[string]interface{}{"type": "string", "description": "Workspace-relative directory to limit the search to. Defaults to the whole workspace ('.')."},
+			"include_glob": map[string]interface{}{"type": "string", "description": "Optional filename glob to restrict which files are searched (e.g. *.py or *Test.java)."},
+			"ignore_case":  map[string]interface{}{"type": "boolean", "description": "Case-insensitive match (default false)."},
 		},
-		"required": []string{"pattern"},
+		"required": []string{"regex"},
 	}
 }
 func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{}) (*vnext.ToolResult, error) {
-	pattern, has := strArg(args, "pattern")
+	pattern, has := strArg(args, "regex")
 	if !has {
-		return fail("search_repo: 'pattern' is required")
+		return fail("search_repo: 'regex' is required")
 	}
 	// When the raw log is withheld (DEEPINSPECT), refuse a search that is clearly
 	// hunting for a log file (e.g. "failure.log", "log.txt", "*.log") rather than
@@ -92,7 +92,7 @@ func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{
 	}
 	re, err := regexp.Compile(expr)
 	if err != nil {
-		return fail("search_repo: invalid pattern: %v", err)
+		return fail("search_repo: invalid regex: %v", err)
 	}
 	base := "."
 	if p, ok := strArg(args, "path"); ok {
@@ -102,7 +102,7 @@ func (t *searchRepoTool) Execute(ctx context.Context, args map[string]interface{
 	if err != nil {
 		return fail("search_repo: %v", err)
 	}
-	include, hasInclude := strArg(args, "include")
+	include, hasInclude := strArg(args, "include_glob")
 
 	var matches []map[string]interface{}
 	filesScanned := 0
@@ -163,7 +163,7 @@ var logFileQueryRe = regexp.MustCompile(`(?i)^[\w./*?-]*?([\w*?-]*\.log|log\.txt
 // include glob, or the path) that looks like an attempt to locate a log file, or
 // "" if none does.
 func logHuntQuery(args map[string]interface{}) string {
-	for _, key := range []string{"pattern", "include", "path"} {
+	for _, key := range []string{"regex", "include_glob", "path"} {
 		if v, ok := strArg(args, key); ok && logFileQueryRe.MatchString(strings.TrimSpace(v)) {
 			return v
 		}
