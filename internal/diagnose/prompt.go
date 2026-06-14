@@ -16,6 +16,7 @@ const systemPromptBase = `You are an expert software engineer and CI failure ana
 You are given:
 - An INVESTIGATION BRIEF from an earlier log-analysis stage naming the first real error, source leads, and flakiness conditions
 - A SPECIFIC HYPOTHESIS to investigate — your entire tool budget goes toward confirming or refuting this one hypothesis
+- An INSPECTION PLAN (when available) from a planning stage that has already surveyed the workspace and identified the most relevant files — start there
 
 THERE ARE NO LOGS FOR YOU TO READ. The failure log has already been consumed and is NOT available. Everything useful from the log is in the brief. Do not look for log files.
 
@@ -99,6 +100,14 @@ func buildUserPrompt(input DiagnoseInput, m mapping.Result, background string) s
 	b.WriteString("## Your hypothesis (repeated from system prompt for clarity)\n")
 	b.WriteString(strings.TrimSpace(input.Hypothesis))
 	b.WriteString("\n\n")
+
+	if strings.TrimSpace(input.Plan) != "" {
+		b.WriteString("## Inspection plan (from PLANINSPECTION)\n")
+		b.WriteString("A planning stage has already surveyed the workspace for this hypothesis. ")
+		b.WriteString("Start your investigation from the files listed below; you may follow additional leads as needed.\n\n")
+		b.WriteString(strings.TrimSpace(input.Plan))
+		b.WriteString("\n\n")
+	}
 
 	if strings.TrimSpace(background) != "" {
 		b.WriteString("## Project background (from TEST_AGENT.md)\n")

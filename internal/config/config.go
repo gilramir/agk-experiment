@@ -30,6 +30,8 @@ const (
 	StageLogParseFeedback    = "logparse_feedback"    // optional; falls back to logparse LLM
 	StageHypothsize          = "hypothesize"          // optional; falls back to logparse LLM
 	StageHypothsizeFeedback  = "hypothesize_feedback" // optional; falls back to hypothesize LLM
+	StagePlanInspect         = "planinspection"         // optional; falls back to deepinspect LLM
+	StagePlanInspectFeedback = "planinspection_feedback" // optional; falls back to planinspection LLM
 	StageDeepInspect         = "deepinspect"
 	StageDeepInspectFeedback = "deepinspect_feedback" // optional; falls back to deepinspect LLM
 	StageCombine             = "combine"              // optional; falls back to logparse LLM
@@ -126,6 +128,14 @@ type StageConfig struct {
 	// HypothesizeMaxFeedbacks is the number of times the FEEDBACK stage may
 	// reject a HYPOTHESIZE output. 0 disables HYPOTHESIZE feedback.
 	HypothesizeMaxFeedbacks int `toml:"hypothesize_max_feedbacks"`
+	// PlanMaxFeedbacks is the number of times the FEEDBACK stage may reject a
+	// PLANINSPECTION output for one hypothesis before marking it as failed
+	// (soft) and moving on. 0 disables PLANINSPECTION feedback.
+	PlanMaxFeedbacks int `toml:"planinspection_max_feedbacks"`
+	// PlanMaxToolIterations caps the tool-calling loop within a single
+	// PLANINSPECTION attempt. PLANINSPECTION is a breadth-first survey, so
+	// this is intentionally lower than the DEEPINSPECT budget.
+	PlanMaxToolIterations int `toml:"planinspection_max_tool_iterations"`
 	// DeepInspectMaxFeedbacks is the number of times the FEEDBACK stage may
 	// reject a DEEPINSPECT result for one hypothesis before marking it as
 	// failed (and moving on to the next hypothesis). 0 disables DEEPINSPECT
@@ -305,6 +315,8 @@ func defaults() *Config {
 		StageConfig: StageConfig{
 			LogParseMaxFeedbacks:         2,
 			HypothesizeMaxFeedbacks:      2,
+			PlanMaxFeedbacks:             1,
+			PlanMaxToolIterations:        20,
 			DeepInspectMaxFeedbacks:      1,
 			DeepInspectMaxToolIterations: 50,
 			CombineMaxFeedbacks:          2,
@@ -357,6 +369,8 @@ func applyEnvOverrides(cfg *Config) {
 
 	setInt(&cfg.StageConfig.LogParseMaxFeedbacks, "TESTDIAG_LOGPARSE_MAX_FEEDBACKS")
 	setInt(&cfg.StageConfig.HypothesizeMaxFeedbacks, "TESTDIAG_HYPOTHESIZE_MAX_FEEDBACKS")
+	setInt(&cfg.StageConfig.PlanMaxFeedbacks, "TESTDIAG_PLANINSPECTION_MAX_FEEDBACKS")
+	setInt(&cfg.StageConfig.PlanMaxToolIterations, "TESTDIAG_PLANINSPECTION_MAX_TOOL_ITERATIONS")
 	setInt(&cfg.StageConfig.DeepInspectMaxFeedbacks, "TESTDIAG_DEEPINSPECT_MAX_FEEDBACKS")
 	setInt(&cfg.StageConfig.DeepInspectMaxToolIterations, "TESTDIAG_DEEPINSPECT_MAX_TOOL_ITERATIONS")
 	setInt(&cfg.StageConfig.CombineMaxFeedbacks, "TESTDIAG_COMBINE_MAX_FEEDBACKS")
@@ -402,6 +416,9 @@ func (c *Config) validate() error {
 	}
 	if cfg := &c.StageConfig; cfg.DeepInspectMaxToolIterations < 1 {
 		cfg.DeepInspectMaxToolIterations = 50
+	}
+	if cfg := &c.StageConfig; cfg.PlanMaxToolIterations < 1 {
+		cfg.PlanMaxToolIterations = 20
 	}
 	return nil
 }

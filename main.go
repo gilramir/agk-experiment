@@ -131,13 +131,16 @@ func run() error {
 		return err
 	}
 
-	// Optional stage LLMs — fall back to logparse for tool-less stages.
+	// Optional stage LLMs — fall back to logparse for tool-less stages,
+	// deepinspect for tool-using stages.
 	hypothesizeLLM := fallbackLLM(cfg, config.StageHypothsize, logparseLLM)
+	planLLM := fallbackLLM(cfg, config.StagePlanInspect, deepinspectLLM)
 	combineLLM := fallbackLLM(cfg, config.StageCombine, logparseLLM)
 
 	// Feedback LLMs — each falls back to its primary stage's LLM.
 	logparseFBLLM := fallbackLLM(cfg, config.StageLogParseFeedback, logparseLLM)
 	hypothesizeFBLLM := fallbackLLM(cfg, config.StageHypothsizeFeedback, hypothesizeLLM)
+	planFBLLM := fallbackLLM(cfg, config.StagePlanInspectFeedback, planLLM)
 	deepinspectFBLLM := fallbackLLM(cfg, config.StageDeepInspectFeedback, deepinspectLLM)
 	combineFBLLM := fallbackLLM(cfg, config.StageCombineFeedback, combineLLM)
 
@@ -158,18 +161,25 @@ func run() error {
 		}
 		// Tool-less stages share a proxy when they use the same endpoint.
 		for stageName, llmPtr := range map[string]*config.LLMSpec{
-			"logparse":             &logparseLLM,
-			"logparse_feedback":    &logparseFBLLM,
-			"hypothesize":          &hypothesizeLLM,
-			"hypothesize_feedback": &hypothesizeFBLLM,
-			"deepinspect_feedback": &deepinspectFBLLM,
-			"combine":              &combineLLM,
-			"combine_feedback":     &combineFBLLM,
+			"logparse":               &logparseLLM,
+			"logparse_feedback":      &logparseFBLLM,
+			"hypothesize":            &hypothesizeLLM,
+			"hypothesize_feedback":   &hypothesizeFBLLM,
+			"planinspection_feedback": &planFBLLM,
+			"deepinspect_feedback":   &deepinspectFBLLM,
+			"combine":                &combineLLM,
+			"combine_feedback":       &combineFBLLM,
 		} {
 			if *llmPtr, err = pm.front(stageName, *llmPtr, nil); err != nil {
 				return err
 			}
 		}
+		// PLANINSPECTION uses workspace tools but no interrupt support.
+		if planLLM, err = pm.front("planinspection", planLLM, deepTools); err != nil {
+			return err
+		}
+		// DEEPINSPECT uses workspace tools and interrupt support. Always gets its
+		// own proxy (the "deepinspect" key suffix ensures no sharing with PLANINSPECTION).
 		if deepinspectLLM, err = pm.front("deepinspect", deepinspectLLM, deepTools); err != nil {
 			return err
 		}
@@ -205,6 +215,10 @@ func run() error {
 		Hypothesize: pipeline.StageSpec{
 			LLM:         hypothesizeLLM,
 			FeedbackLLM: hypothesizeFBLLM,
+		},
+		Plan: pipeline.StageSpec{
+			LLM:         planLLM,
+			FeedbackLLM: planFBLLM,
 		},
 		DeepInspect: pipeline.StageSpec{
 			LLM:         deepinspectLLM,
@@ -300,6 +314,11 @@ func (m *proxyManager) enabled() bool {
 
 func (m *proxyManager) front(stage string, spec config.LLMSpec, proxyTools []llmproxy.Tool) (config.LLMSpec, error) {
 	key := spec.BaseURL + "\x00" + toolSig(proxyTools)
+	// DEEPINSPECT has interrupt support; ensure it never shares a proxy with
+	// another tool-using stage (e.g. PLANINSPECTION) even on the same endpoint.
+	if stage == "deepinspect" {
+		key += "\x00interrupt"
+	}
 	px, ok := m.byKey[key]
 	if !ok {
 		var ic *llmproxy.InterruptController

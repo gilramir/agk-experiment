@@ -9,9 +9,12 @@
 //	             a ranked list of 1+ hypotheses (.testdiag/handoff/<test>.hypothesize.md);
 //	             0 hypotheses → the test is abandoned
 //	FEEDBACK    — checks the hypothesis list (up to HypothesizeMaxFeedbacks)
+//	PLAN        — one tool-using agent per hypothesis; surveys the workspace and
+//	             produces an annotated file list for DEEPINSPECT to follow
+//	             (.testdiag/handoff/<test>.h<N>.plan.md); soft-fails per hypothesis
 //	DEEPINSPECT — one agent run per hypothesis, jailed to workspace source tools;
-//	             each gets its own FEEDBACK gate; a failed hypothesis is noted but
-//	             does not stop the pipeline
+//	             receives both the hypothesis and the PLAN output; each gets its own
+//	             FEEDBACK gate; a failed hypothesis is noted but does not stop the pipeline
 //	COMBINE     — reads all hypotheses + DEEPINSPECT results and picks the best
 //	             supported root cause (.testdiag/handoff/<test>.combine.md)
 //	FEEDBACK    — checks the combined analysis (up to CombineMaxFeedbacks)
@@ -26,6 +29,7 @@ import (
 	"github.com/gilbertr/testdiag/internal/config"
 	"github.com/gilbertr/testdiag/internal/diagnose"
 	"github.com/gilbertr/testdiag/internal/jenkins"
+	"github.com/gilbertr/testdiag/internal/planner"
 	"github.com/gilbertr/testdiag/internal/workspace"
 )
 
@@ -37,6 +41,7 @@ const (
 	StateLogParse    State = "LOGPARSE"
 	StateFeedback    State = "FEEDBACK"
 	StateHypothsize  State = "HYPOTHESIZE"
+	StatePlanInspect State = "PLANINSPECTION"
 	StateDeepInspect State = "DEEPINSPECT"
 	StateCombine     State = "COMBINE"
 	StateDone        State = "DONE"
@@ -53,6 +58,18 @@ type Hypothesis struct {
 // suitable for injecting into prompts.
 func (h Hypothesis) Text() string {
 	return fmt.Sprintf("### Hypothesis %d: %s\n\n%s", h.Index, h.Title, h.Description)
+}
+
+// PlanInspectOutcome records the result of one PLANINSPECTION+FEEDBACK pass
+// for one hypothesis. A failed outcome is noted but does not stop the pipeline
+// — DEEPINSPECT will work from the brief alone for that hypothesis.
+type PlanInspectOutcome struct {
+	Hypothesis       Hypothesis
+	Content          string   // annotated file list as Markdown
+	ToolsCalled      []string // tools the planner used
+	FeedbackApproved bool     // true if FEEDBACK accepted the result
+	Failed           bool     // true if the run errored or feedback was exhausted
+	FailReason       string   // populated when Failed=true
 }
 
 // DeepInspectOutcome records the result of one DEEPINSPECT+FEEDBACK pass for
@@ -74,6 +91,7 @@ type FinalResult struct {
 	LogPath      string               // workspace-relative saved log
 	Brief        string               // LOGPARSE output
 	Hypotheses   []Hypothesis         // HYPOTHESIZE output
+	Plans        []PlanInspectOutcome // one per hypothesis (PLANINSPECTION stage)
 	DeepInspects []DeepInspectOutcome // one per hypothesis
 	Combined     string               // COMBINE output (final root cause Markdown)
 	Duration     time.Duration
@@ -88,6 +106,7 @@ type Context struct {
 	Brief          string               // LOGPARSE content
 	HypothesisPath string               // HYPOTHESIZE handoff file
 	Hypotheses     []Hypothesis         // HYPOTHESIZE parsed output
+	Plans          []PlanInspectOutcome // PLANINSPECTION+FEEDBACK results, one per hypothesis
 	DeepInspects   []DeepInspectOutcome // DEEPINSPECT+FEEDBACK results
 	CombinePath    string               // COMBINE handoff file
 	Combined       string               // COMBINE content
@@ -111,6 +130,7 @@ type StageSpec struct {
 type PipelineSpec struct {
 	LogParse    StageSpec
 	Hypothesize StageSpec
+	Plan        StageSpec
 	DeepInspect StageSpec
 	Combine     StageSpec
 }
@@ -129,15 +149,19 @@ type Pipeline struct {
 func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, background string, verbose bool, drainInterrupt func()) *Pipeline {
 	sc := &cfg.StageConfig
 
+	plnr := planner.New(ws, spec.Plan.LLM, background, sc.PlanMaxToolIterations, cfg.Workspace.Mapper)
 	diagnoser := diagnose.New(ws, spec.DeepInspect.LLM, background, sc.DeepInspectMaxToolIterations, cfg.Workspace.Mapper, drainInterrupt)
 
 	// Build feedback checkers for each stage.
-	var lpFB, hFB, diFB, cFB *feedbackChecker
+	var lpFB, hFB, planFB, diFB, cFB *feedbackChecker
 	if sc.LogParseMaxFeedbacks > 0 {
 		lpFB = &feedbackChecker{llm: spec.LogParse.FeedbackLLM, systemPrompt: logParseFeedbackPrompt}
 	}
 	if sc.HypothesizeMaxFeedbacks > 0 {
 		hFB = &feedbackChecker{llm: spec.Hypothesize.FeedbackLLM, systemPrompt: hypothesizeFeedbackPrompt}
+	}
+	if sc.PlanMaxFeedbacks > 0 {
+		planFB = &feedbackChecker{llm: spec.Plan.FeedbackLLM, systemPrompt: planInspectFeedbackPrompt}
 	}
 	if sc.DeepInspectMaxFeedbacks > 0 {
 		diFB = &feedbackChecker{llm: spec.DeepInspect.FeedbackLLM, systemPrompt: deepInspectFeedbackPrompt}
@@ -156,6 +180,10 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 	if sc.HypothesizeMaxFeedbacks > 0 {
 		names = append(names, StateFeedback)
 	}
+	names = append(names, StatePlanInspect)
+	if sc.PlanMaxFeedbacks > 0 {
+		names = append(names, StateFeedback)
+	}
 	names = append(names, StateDeepInspect)
 	names = append(names, StateCombine)
 	if sc.CombineMaxFeedbacks > 0 {
@@ -167,6 +195,7 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 			&downloadStage{ws: ws},
 			newLogParseStage(ws, spec.LogParse.LLM, lpFB, sc.LogParseMaxFeedbacks, verbose),
 			newHypothesizeStage(ws, spec.Hypothesize.LLM, archDoc, hFB, sc.HypothesizeMaxFeedbacks, verbose),
+			newPlanInspectAllStage(plnr, ws, archDoc, planFB, sc.PlanMaxFeedbacks, verbose),
 			newDeepInspectAllStage(diagnoser, diFB, sc.DeepInspectMaxFeedbacks, verbose),
 			newCombineStage(ws, spec.Combine.LLM, cFB, sc.CombineMaxFeedbacks, verbose),
 		},
@@ -201,6 +230,7 @@ func (p *Pipeline) Run(ctx context.Context, test jenkins.FailedTest) (FinalResul
 		LogPath:      sc.LogPath,
 		Brief:        sc.Brief,
 		Hypotheses:   sc.Hypotheses,
+		Plans:        sc.Plans,
 		DeepInspects: sc.DeepInspects,
 		Combined:     sc.Combined,
 		Duration:     time.Since(start),

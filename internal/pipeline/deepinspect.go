@@ -27,21 +27,26 @@ func (s *deepInspectAllStage) Name() State { return StateDeepInspect }
 
 func (s *deepInspectAllStage) Run(ctx context.Context, sc *Context) error {
 	sc.DeepInspects = make([]DeepInspectOutcome, 0, len(sc.Hypotheses))
-	for _, h := range sc.Hypotheses {
+	for i, h := range sc.Hypotheses {
 		if ctx.Err() != nil {
 			sc.DeepInspects = append(sc.DeepInspects, DeepInspectOutcome{
 				Hypothesis: h, Failed: true, FailReason: "context cancelled",
 			})
 			continue
 		}
-		sc.DeepInspects = append(sc.DeepInspects, s.runOne(ctx, sc, h))
+		// Pass the PLANINSPECTION output for this hypothesis, if available and successful.
+		var planContent string
+		if i < len(sc.Plans) && !sc.Plans[i].Failed {
+			planContent = sc.Plans[i].Content
+		}
+		sc.DeepInspects = append(sc.DeepInspects, s.runOne(ctx, sc, h, planContent))
 	}
 	return nil
 }
 
 // runOne runs the DEEPINSPECT+FEEDBACK loop for one hypothesis. It never
 // returns an error; failures are captured in the returned outcome.
-func (s *deepInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothesis) DeepInspectOutcome {
+func (s *deepInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothesis, planContent string) DeepInspectOutcome {
 	out := DeepInspectOutcome{Hypothesis: h}
 
 	if s.verbose {
@@ -59,6 +64,7 @@ func (s *deepInspectAllStage) runOne(ctx context.Context, sc *Context, h Hypothe
 			Brief:           sc.Brief,
 			Hypothesis:      h.Text(),
 			HypothesisIndex: h.Index,
+			Plan:            planContent,
 			PrevResult:      prevResult,
 			Critique:        critique,
 		})

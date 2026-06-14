@@ -38,6 +38,7 @@ type DiagnoseInput struct {
 	Brief           string // LOGPARSE handoff (not the raw log)
 	Hypothesis      string // the full hypothesis text to investigate
 	HypothesisIndex int    // 1-based index for notebook naming
+	Plan            string // PLAN output: annotated file list (may be empty)
 	PrevResult      string // empty on first attempt; prior draft for retry
 	Critique        string // empty on first attempt; feedback for retry
 }

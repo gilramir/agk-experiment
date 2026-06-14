@@ -117,6 +117,20 @@ Respond with EXACTLY ONE of:
 
 Output nothing else.`
 
+// planInspectFeedbackPrompt is the criteria for a PLANINSPECTION output.
+const planInspectFeedbackPrompt = `You are reviewing an inspection plan produced by a planning stage. The plan lists workspace source files that a subsequent deep-inspection agent should examine to investigate a specific hypothesis about a failing flaky test.
+
+A good inspection plan must satisfy ALL THREE criteria:
+1. Lists at least two specific workspace-relative file paths with a note for each.
+2. Each entry explains WHY the file is relevant to the specific hypothesis — not just "this is a source file."
+3. Entries are prioritized so the most critical files appear first.
+
+Respond with EXACTLY ONE of:
+- The single word APPROVED if all three criteria are met, OR
+- NEEDS REVISION: followed by a concise bulleted list of exactly what is missing or unclear.
+
+Output nothing else.`
+
 // deepInspectFeedbackPrompt is the criteria for a DEEPINSPECT analysis.
 const deepInspectFeedbackPrompt = `You are a code investigation reviewer. You will be shown an analysis produced by a deep-inspection agent that investigated one specific hypothesis about a flaky test failure. Assess whether the analysis is adequate.
 
