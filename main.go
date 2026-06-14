@@ -8,7 +8,7 @@
 // test, and runs each through a pipeline:
 //
 //	DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
-//	[DEEPINSPECT → FEEDBACK] × N → COMBINE → FEEDBACK
+//	[DEEPINSPECT → FEEDBACK] × N → SUMMARIZE → FEEDBACK
 //
 // writing one Markdown report per failure.
 package main
@@ -146,7 +146,7 @@ func run() error {
 	// deepinspect for tool-using stages.
 	hypothesizeLLM := fallbackLLM(cfg, config.StageHypothsize, logparseLLM)
 	planLLM := fallbackLLM(cfg, config.StagePlanInspect, deepinspectLLM)
-	combineLLM := fallbackLLM(cfg, config.StageCombine, logparseLLM)
+	summarizeLLM := fallbackLLM(cfg, config.StageSummarize, logparseLLM)
 	memorizeLLM := fallbackLLM(cfg, config.StageMemoize, logparseLLM)
 
 	// Feedback LLMs — each falls back to its primary stage's LLM.
@@ -154,7 +154,7 @@ func run() error {
 	hypothesizeFBLLM := fallbackLLM(cfg, config.StageHypothsizeFeedback, hypothesizeLLM)
 	planFBLLM := fallbackLLM(cfg, config.StagePlanInspectFeedback, planLLM)
 	deepinspectFBLLM := fallbackLLM(cfg, config.StageDeepInspectFeedback, deepinspectLLM)
-	combineFBLLM := fallbackLLM(cfg, config.StageCombineFeedback, combineLLM)
+	summarizeFBLLM := fallbackLLM(cfg, config.StageSummarizeFeedback, summarizeLLM)
 
 	// The interrupt controller is the sole reader of os.Stdin. It muxes lines
 	// between run_script confirmation prompts and DEEPINSPECT operator chat.
@@ -179,8 +179,8 @@ func run() error {
 			"hypothesize_feedback":    &hypothesizeFBLLM,
 			"planinspection_feedback": &planFBLLM,
 			"deepinspect_feedback":    &deepinspectFBLLM,
-			"combine":                 &combineLLM,
-			"combine_feedback":        &combineFBLLM,
+			"summarize":               &summarizeLLM,
+			"summarize_feedback":      &summarizeFBLLM,
 			"memorize":                &memorizeLLM,
 		} {
 			if *llmPtr, err = pm.front(stageName, *llmPtr, nil); err != nil {
@@ -239,9 +239,9 @@ func run() error {
 			FeedbackLLM:  deepinspectFBLLM,
 			ResetCounter: pm.resetFn("deepinspect"),
 		},
-		Combine: pipeline.StageSpec{
-			LLM:         combineLLM,
-			FeedbackLLM: combineFBLLM,
+		Summarize: pipeline.StageSpec{
+			LLM:         summarizeLLM,
+			FeedbackLLM: summarizeFBLLM,
 		},
 	}
 	var pauseFn func()
@@ -270,8 +270,8 @@ func run() error {
 	fmt.Printf("  DEEPINSPECT -> %s (model %s, tools=%v, max_iters=%d, feedbacks=%d)\n",
 		deepinspectLLM.BaseURL, deepinspectLLM.Model, toolNames,
 		sc.DeepInspectMaxToolIterations, sc.DeepInspectMaxFeedbacks)
-	fmt.Printf("  COMBINE     -> %s (model %s, feedbacks=%d)\n",
-		combineLLM.BaseURL, combineLLM.Model, sc.CombineMaxFeedbacks)
+	fmt.Printf("  SUMMARIZE   -> %s (model %s, feedbacks=%d)\n",
+		summarizeLLM.BaseURL, summarizeLLM.Model, sc.SummarizeMaxFeedbacks)
 	fmt.Printf("  MEMORIZE    -> %s (model %s)\n",
 		memorizeLLM.BaseURL, memorizeLLM.Model)
 	if memory != "" {

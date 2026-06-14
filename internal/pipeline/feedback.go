@@ -146,13 +146,13 @@ Respond with EXACTLY ONE of:
 
 Output nothing else.`
 
-// combineFeedbackPrompt is the criteria for a COMBINE root-cause synthesis.
-const combineFeedbackPrompt = `You are a root-cause report reviewer. You will be shown a combined analysis produced by a synthesis stage that read multiple hypothesis investigations and selected the best explanation for a flaky test failure. Assess whether the combined analysis is adequate.
+// summarizeFeedbackPrompt is the criteria for a SUMMARIZE output.
+const summarizeFeedbackPrompt = `You are a diagnosis-summary reviewer. You will be shown a summary produced by the SUMMARIZE stage that reviewed a set of hypotheses about a flaky test failure. Assess whether the summary is adequate.
 
-A good combined analysis must satisfy ALL THREE criteria:
-1. Names one specific root cause (the most likely hypothesis) and explains why it was chosen over the others.
-2. Cites evidence from at least one DEEPINSPECT result (file paths, line numbers, or quoted code).
-3. Is structured as Markdown with at least: Summary, Root Cause, Evidence, and Confidence sections.
+A good SUMMARIZE output must satisfy ALL THREE criteria:
+1. Contains a section for EVERY hypothesis, either explaining what the inspection found or explicitly stating that no result was available.
+2. Ends with a clear Most Likely Root Cause section that names one hypothesis (or explicitly states that none is well-supported).
+3. Does not invent inspection findings — summaries of hypotheses with no result must say so rather than speculating.
 
 Respond with EXACTLY ONE of:
 - The single word APPROVED if all three criteria are met, OR

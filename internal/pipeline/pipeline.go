@@ -17,9 +17,10 @@
 //	                 receives both the hypothesis and the PLANINSPECTION output; each gets
 //	                 its own FEEDBACK gate; a failed hypothesis is noted but does not stop the pipeline;
 //	                 result saved to .testdiag/handoff/<test>.h<N>.deepinspect.md
-//	COMBINE         — reads all hypotheses + DEEPINSPECT results and picks the best
-//	                 supported root cause (.testdiag/handoff/<test>.combine.md)
-//	FEEDBACK        — checks the combined analysis (up to CombineMaxFeedbacks)
+//	SUMMARIZE       — summarizes each hypothesis (noting whether an inspection result
+//	                 is available) and identifies the most likely root cause
+//	                 (.testdiag/handoff/<test>.summarize.md)
+//	FEEDBACK        — checks the summary (up to SummarizeMaxFeedbacks)
 //
 // After the pipeline the caller runs a MEMORIZE step (internal/distill) that
 // extracts durable codebase facts from all handoff files and appends them to
@@ -49,7 +50,7 @@ const (
 	StateHypothsize  State = "HYPOTHESIZE"
 	StatePlanInspect State = "PLANINSPECTION"
 	StateDeepInspect State = "DEEPINSPECT"
-	StateCombine     State = "COMBINE"
+	StateSummarize   State = "SUMMARIZE"
 	StateDone        State = "DONE"
 )
 
@@ -99,7 +100,7 @@ type FinalResult struct {
 	Hypotheses   []Hypothesis         // HYPOTHESIZE output
 	Plans        []PlanInspectOutcome // one per hypothesis (PLANINSPECTION stage)
 	DeepInspects []DeepInspectOutcome // one per hypothesis
-	Combined     string               // COMBINE output (final root cause Markdown)
+	Summary      string               // SUMMARIZE output
 	Duration     time.Duration
 }
 
@@ -114,8 +115,8 @@ type Context struct {
 	Hypotheses     []Hypothesis         // HYPOTHESIZE parsed output
 	Plans          []PlanInspectOutcome // PLANINSPECTION+FEEDBACK results, one per hypothesis
 	DeepInspects   []DeepInspectOutcome // DEEPINSPECT+FEEDBACK results
-	CombinePath    string               // COMBINE handoff file
-	Combined       string               // COMBINE content
+	SummaryPath    string               // SUMMARIZE handoff file
+	Summary        string               // SUMMARIZE content
 }
 
 // Stage is one step of the state machine.
@@ -143,7 +144,7 @@ type PipelineSpec struct {
 	Hypothesize StageSpec
 	Plan        StageSpec
 	DeepInspect StageSpec
-	Combine     StageSpec
+	Summarize   StageSpec
 }
 
 // Pipeline runs the ordered stages for each test against a fixed workspace.
@@ -182,8 +183,8 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 	if sc.DeepInspectMaxFeedbacks > 0 {
 		diFB = &feedbackChecker{llm: spec.DeepInspect.FeedbackLLM, systemPrompt: deepInspectFeedbackPrompt}
 	}
-	if sc.CombineMaxFeedbacks > 0 {
-		cFB = &feedbackChecker{llm: spec.Combine.FeedbackLLM, systemPrompt: combineFeedbackPrompt}
+	if sc.SummarizeMaxFeedbacks > 0 {
+		cFB = &feedbackChecker{llm: spec.Summarize.FeedbackLLM, systemPrompt: summarizeFeedbackPrompt}
 	}
 
 	archDoc := cfg.Workspace.ArchitectureDoc
@@ -201,8 +202,8 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 		names = append(names, StateFeedback)
 	}
 	names = append(names, StateDeepInspect)
-	names = append(names, StateCombine)
-	if sc.CombineMaxFeedbacks > 0 {
+	names = append(names, StateSummarize)
+	if sc.SummarizeMaxFeedbacks > 0 {
 		names = append(names, StateFeedback)
 	}
 
@@ -213,7 +214,7 @@ func New(cfg *config.Config, ws *workspace.Workspace, spec PipelineSpec, backgro
 			newHypothesizeStage(ws, spec.Hypothesize.LLM, archDoc, hFB, sc.HypothesizeMaxFeedbacks, verbose, pauseFn),
 			newPlanInspectAllStage(plnr, ws, archDoc, planFB, sc.PlanMaxFeedbacks, spec.Plan.ResetCounter, verbose, pauseFn),
 			newDeepInspectAllStage(diagnoser, ws, diFB, sc.DeepInspectMaxFeedbacks, spec.DeepInspect.ResetCounter, verbose, pauseFn),
-			newCombineStage(ws, spec.Combine.LLM, cFB, sc.CombineMaxFeedbacks, verbose, pauseFn),
+			newSummarizeStage(ws, spec.Summarize.LLM, cFB, sc.SummarizeMaxFeedbacks, verbose, pauseFn),
 		},
 		stateNames: names,
 		verbose:    verbose,
@@ -248,7 +249,7 @@ func (p *Pipeline) Run(ctx context.Context, test jenkins.FailedTest) (FinalResul
 		Hypotheses:   sc.Hypotheses,
 		Plans:        sc.Plans,
 		DeepInspects: sc.DeepInspects,
-		Combined:     sc.Combined,
+		Summary:      sc.Summary,
 		Duration:     time.Since(start),
 	}, nil
 }

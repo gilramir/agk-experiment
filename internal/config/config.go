@@ -34,8 +34,8 @@ const (
 	StagePlanInspectFeedback = "planinspection_feedback" // optional; falls back to planinspection LLM
 	StageDeepInspect         = "deepinspect"
 	StageDeepInspectFeedback = "deepinspect_feedback" // optional; falls back to deepinspect LLM
-	StageCombine             = "combine"              // optional; falls back to logparse LLM
-	StageCombineFeedback     = "combine_feedback"     // optional; falls back to combine LLM
+	StageSummarize           = "summarize"             // optional; falls back to logparse LLM
+	StageSummarizeFeedback   = "summarize_feedback"   // optional; falls back to summarize LLM
 	StageMemoize             = "memorize"             // optional; falls back to logparse LLM
 )
 
@@ -146,9 +146,9 @@ type StageConfig struct {
 	// DEEPINSPECT attempt: how many times the agent may call a tool and feed
 	// the result back before it must produce an answer.
 	DeepInspectMaxToolIterations int `toml:"deepinspect_max_tool_iterations"`
-	// CombineMaxFeedbacks is the number of times the FEEDBACK stage may reject
-	// the COMBINE output. 0 disables COMBINE feedback.
-	CombineMaxFeedbacks int `toml:"combine_max_feedbacks"`
+	// SummarizeMaxFeedbacks is the number of times the FEEDBACK stage may reject
+	// the SUMMARIZE output. 0 disables SUMMARIZE feedback.
+	SummarizeMaxFeedbacks int `toml:"summarize_max_feedbacks"`
 }
 
 // Output controls how diagnosis reports are written.
@@ -173,7 +173,7 @@ func (c *Config) LLMForStage(stage string) (LLMSpec, error) {
 // LLMForStageOptional resolves the LLM for a stage that may have no explicit
 // assignment. Unlike LLMForStage it does not error on a missing or unknown
 // assignment — it returns (zero, false) instead, letting the caller supply a
-// fallback. Use this for optional stages like hypothesize, combine, and the
+// fallback. Use this for optional stages like hypothesize, summarize, and the
 // per-stage feedback overrides.
 func (c *Config) LLMForStageOptional(stage string) (LLMSpec, bool) {
 	name, ok := c.Stages[stage]
@@ -320,7 +320,7 @@ func defaults() *Config {
 			PlanMaxToolIterations:        20,
 			DeepInspectMaxFeedbacks:      1,
 			DeepInspectMaxToolIterations: 50,
-			CombineMaxFeedbacks:          2,
+			SummarizeMaxFeedbacks:        2,
 		},
 	}
 }
@@ -374,7 +374,7 @@ func applyEnvOverrides(cfg *Config) {
 	setInt(&cfg.StageConfig.PlanMaxToolIterations, "TESTDIAG_PLANINSPECTION_MAX_TOOL_ITERATIONS")
 	setInt(&cfg.StageConfig.DeepInspectMaxFeedbacks, "TESTDIAG_DEEPINSPECT_MAX_FEEDBACKS")
 	setInt(&cfg.StageConfig.DeepInspectMaxToolIterations, "TESTDIAG_DEEPINSPECT_MAX_TOOL_ITERATIONS")
-	setInt(&cfg.StageConfig.CombineMaxFeedbacks, "TESTDIAG_COMBINE_MAX_FEEDBACKS")
+	setInt(&cfg.StageConfig.SummarizeMaxFeedbacks, "TESTDIAG_SUMMARIZE_MAX_FEEDBACKS")
 }
 
 // envName upper-cases an LLM name and replaces any non-alphanumeric run with a

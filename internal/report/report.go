@@ -48,9 +48,9 @@ func render(r pipeline.FinalResult) string {
 	fmt.Fprintf(&b, "| Duration | %s |\n", r.Duration.Round(time.Millisecond))
 	b.WriteString("\n---\n\n")
 
-	body := strings.TrimSpace(r.Combined)
+	body := strings.TrimSpace(r.Summary)
 	if body == "" {
-		body = "_The COMBINE stage produced no analysis._"
+		body = "_The SUMMARIZE stage produced no output._"
 	}
 	b.WriteString(body)
 	b.WriteString("\n")

@@ -26,7 +26,7 @@ const (
 )
 
 // systemPrompt instructs the distillation LLM.
-const systemPrompt = `You are a codebase knowledge extractor. You will be shown all the investigation handoff files from one completed test diagnosis — the log analysis brief, hypotheses, inspection plans, deep-inspection results, and combined root cause analysis.
+const systemPrompt = `You are a codebase knowledge extractor. You will be shown all the investigation handoff files from one completed test diagnosis — the log analysis brief, hypotheses, inspection plans, deep-inspection results, and the summary with most-likely root cause.
 
 Extract ONLY facts that are:
 - Specific to THIS codebase (file paths, function names, module roles, shared resources, configuration patterns)

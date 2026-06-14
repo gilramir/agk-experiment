@@ -10,7 +10,7 @@ Jenkins build URL it fetches the test report, and for each failed test it runs a
 
 ```
 DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
-[DEEPINSPECT → FEEDBACK] × N → COMBINE → FEEDBACK
+[DEEPINSPECT → FEEDBACK] × N → SUMMARIZE → FEEDBACK
 ```
 
 - **DOWNLOAD** — save the raw failure log to disk
@@ -20,8 +20,8 @@ DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
 - **FEEDBACK** — gate on the hypothesis list (`hypothesize_max_feedbacks`)
 - **DEEPINSPECT × N** — one fresh agent per hypothesis, jailed to the workspace source tools; investigates whether that hypothesis is CONFIRMED / REFUTED / INCONCLUSIVE
 - **FEEDBACK per DEEPINSPECT** — gate on each DEEPINSPECT result (`deepinspect_max_feedbacks`); a failed hypothesis is soft-failed (noted but does not stop the pipeline)
-- **COMBINE** — tool-less LLM pass that reads all hypotheses and DEEPINSPECT results and selects the best-supported root cause
-- **FEEDBACK** — gate on the combined analysis (`combine_max_feedbacks`)
+- **SUMMARIZE** — tool-less LLM pass that summarizes each hypothesis (noting whether an inspection result is available or not), then identifies the most likely root cause
+- **FEEDBACK** — gate on the summary (`summarize_max_feedbacks`)
 
 Each stage hands off to the next through a Markdown file on disk (`.testdiag/handoff/`) and each LLM can be configured independently. Different LLMs can be assigned to different stages so a cheap model can parse the log while a stronger one does the source tracing.
 
@@ -50,7 +50,7 @@ The pipeline is sequential: fetch failures → run each failure through the stag
   starting the per-stage LLM proxies (a `proxyManager` runs at most one proxy per
   distinct `(endpoint, advertised tool set)` and repoints each LLM's `BaseURL`), and
   `process()`, which runs each failure through the `pipeline` one at a time in order.
-  LLMs for optional stages (HYPOTHESIZE, COMBINE, and all feedback stages) fall back
+  LLMs for optional stages (HYPOTHESIZE, SUMMARIZE, and all feedback stages) fall back
   to the logparse LLM when not explicitly configured. Each failed test is fully
   independent (no shared agent state); sequential execution keeps output and
   `run_script` approval prompts coherent for the operator.
@@ -65,12 +65,12 @@ The pipeline is sequential: fetch failures → run each failure through the stag
   returned by `UserConfigPath()` (renamed from `Path()` in the two-file redesign).
   LLMs are defined once under `[llms.<name>]` and each stage points at one by name
   under `[stages]`; `LLMForStage` resolves the pair and errors clearly if a required
-  stage is unassigned. Optional stage assignments (hypothesize, combine, all feedback
+  stage is unassigned. Optional stage assignments (hypothesize, summarize, all feedback
   stages) are resolved via `LLMForStageOptional` and fall back to a sensible default
   at the call site. Per-stage tuning knobs live under `[stage_config]` as a flat
   struct (`StageConfig`): `logparse_max_feedbacks`, `hypothesize_max_feedbacks`,
   `deepinspect_max_feedbacks`, `deepinspect_max_tool_iterations`,
-  `combine_max_feedbacks` — each has a `TESTDIAG_<STAGE>_*` env var.
+  `summarize_max_feedbacks` — each has a `TESTDIAG_<STAGE>_*` env var.
   `Workspace.ArchitectureDoc` (config key `workspace.architecture_doc`, env
   `TESTDIAG_ARCHITECTURE_DOC`) is the workspace-relative path to an architecture
   document HYPOTHESIZE reads.
@@ -90,12 +90,13 @@ The pipeline is sequential: fetch failures → run each failure through the stag
     `diagnose.Diagnoser.Diagnose` per hypothesis, runs FEEDBACK on each result, and
     soft-fails any hypothesis whose agent errored or whose feedback was exhausted;
     results accumulate in `sc.DeepInspects`
-  - `combine.go` — tool-less agent receives all hypotheses + DEEPINSPECT outcomes
-    and selects the best root cause (`.testdiag/handoff/<test>.combine.md`)
+  - `summarize.go` — tool-less agent summarizes each hypothesis (noting whether an
+    inspection result is available) and identifies the most likely root cause
+    (`.testdiag/handoff/<test>.summarize.md`)
   - `feedback.go` — `feedbackChecker` is a shared struct with a configurable
     `systemPrompt` field; each stage gate uses a different prompt constant
     (`logParseFeedbackPrompt`, `hypothesizeFeedbackPrompt`, `deepInspectFeedbackPrompt`,
-    `combineFeedbackPrompt`). `feedbackChecker.Check` returns APPROVED or a critique
+    `summarizeFeedbackPrompt`). `feedbackChecker.Check` returns APPROVED or a critique
     string the caller uses to build a retry prompt.
 
   Key types in `pipeline.go`: `Hypothesis{Index, Title, Description}`,
@@ -168,7 +169,7 @@ The pipeline is sequential: fetch failures → run each failure through the stag
   and continues with an empty mapping so the agent can locate the file itself.
 
 - **`internal/report`** — writes one Markdown root-cause report per test into the
-  output dir. Takes `pipeline.FinalResult`; renders the COMBINE output as the main
+  output dir. Takes `pipeline.FinalResult`; renders the SUMMARIZE output as the main
   body and appends a per-hypothesis DEEPINSPECT appendix (collapsed in `<details>`).
 
 - **`internal/toolproto`** — normalizes the various native tool-call syntaxes

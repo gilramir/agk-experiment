@@ -21,7 +21,7 @@ Given a Jenkins build URL:
 
    ```
    DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
-   [PLANINSPECTION → FEEDBACK → DEEPINSPECT → FEEDBACK] × N → COMBINE → FEEDBACK
+   [PLANINSPECTION → FEEDBACK → DEEPINSPECT → FEEDBACK] × N → SUMMARIZE → FEEDBACK
    → MEMORIZE
    ```
 
@@ -36,7 +36,7 @@ Given a Jenkins build URL:
    | FEEDBACK | Accept plan or return critique | — |
    | DEEPINSPECT × N | Confirm/refute hypothesis via source inspection | workspace source tools |
    | FEEDBACK | Accept result or return critique | — |
-   | COMBINE | Select best-supported root cause from all outcomes | — |
+   | SUMMARIZE | Summarize each hypothesis (noting whether an inspection result exists), then identify the most likely root cause | — |
    | FEEDBACK | Accept synthesis or return critique | — |
    | MEMORIZE | Extract durable codebase facts → `.testdiag/memory.md` | — |
 
@@ -75,11 +75,13 @@ Given a Jenkins build URL:
      stop the pipeline.
    - **FEEDBACK per DEEPINSPECT** — checks each DEEPINSPECT result independently;
      retries up to `deepinspect_max_feedbacks` times.
-   - **COMBINE** — reads all hypotheses and DEEPINSPECT results (successful and
-     failed) and picks the best-supported root cause
-     (`.testdiag/handoff/<test>.combine.md`).
-   - **FEEDBACK** — checks the combined analysis; retries up to
-     `combine_max_feedbacks` times.
+   - **SUMMARIZE** — for each hypothesis, writes a short paragraph: if a
+     DEEPINSPECT result exists it explains what the inspector found; if not
+     (inspection failed or was not run) it says so explicitly. After all
+     hypothesis summaries it identifies the most likely root cause
+     (`.testdiag/handoff/<test>.summarize.md`).
+   - **FEEDBACK** — checks the summarized analysis; retries up to
+     `summarize_max_feedbacks` times.
 
    - **MEMORIZE** — after the report is written, a tool-less LLM reads all the
      pipeline handoff files for that test and extracts **durable, reusable
@@ -91,11 +93,11 @@ Given a Jenkins build URL:
      silently ignored.
 
 4. Writes one Markdown root-cause report per test under `test-diagnosis/`. The
-   report contains the COMBINE analysis as its main body plus a per-hypothesis
+   report contains the SUMMARIZE analysis as its main body plus a per-hypothesis
    DEEPINSPECT appendix.
 
 You can assign a **different LLM to every stage** (see [Setup](#setup)): a cheap
-model can parse the log, generate hypotheses, combine results, and distill memory,
+model can parse the log, generate hypotheses, summarize results, and distill memory,
 while a stronger model does the source tracing. PLANINSPECTION defaults to the
 deepinspect LLM when not explicitly assigned; all other optional stages (including
 MEMORIZE) default to the logparse LLM.
@@ -129,7 +131,7 @@ context window.
 
 The two log tools are not advertised to PLANINSPECTION or DEEPINSPECT and are
 hard-disabled while either runs, so neither can re-read the raw log — both work from
-the brief. All other stages (LOGPARSE, HYPOTHESIZE, FEEDBACK, COMBINE, MEMORIZE) use
+the brief. All other stages (LOGPARSE, HYPOTHESIZE, FEEDBACK, SUMMARIZE, MEMORIZE) use
 no tools; their inputs are given inline.
 
 The prompt steers the model to `count_lines`/`grep`/`read_lines` rather than
@@ -186,13 +188,13 @@ deepinspect = "deep"   # gets the brief + plan + source tools, finds the root ca
 # Optional: override individual stages
 # planinspection           = "deep"   # surveys workspace for relevant files; defaults to deepinspect LLM
 # hypothesize              = "fast"   # all others default to logparse LLM
-# combine                  = "fast"
+# summarize                  = "fast"
 # memorize                 = "fast"   # post-test distillation; defaults to logparse LLM
 # logparse_feedback        = "fast"
 # hypothesize_feedback     = "fast"
 # planinspection_feedback  = "fast"
 # deepinspect_feedback     = "fast"
-# combine_feedback         = "fast"
+# summarize_feedback         = "fast"
 ```
 
 The two required stages are `logparse` and `deepinspect`. PLANINSPECTION defaults to
@@ -223,7 +225,7 @@ planinspection_max_feedbacks          = 1   # TESTDIAG_PLANINSPECTION_MAX_FEEDBA
 planinspection_max_tool_iterations    = 20  # TESTDIAG_PLANINSPECTION_MAX_TOOL_ITERATIONS
 deepinspect_max_feedbacks             = 1   # TESTDIAG_DEEPINSPECT_MAX_FEEDBACKS
 deepinspect_max_tool_iterations       = 50  # TESTDIAG_DEEPINSPECT_MAX_TOOL_ITERATIONS
-combine_max_feedbacks                 = 2   # TESTDIAG_COMBINE_MAX_FEEDBACKS
+summarize_max_feedbacks                 = 2   # TESTDIAG_SUMMARIZE_MAX_FEEDBACKS
 ```
 
 Set any `*_max_feedbacks` to `0` to disable feedback for that stage.
@@ -299,7 +301,7 @@ agent recognizes.
 `[proxy].normalize_tool_calls` (or `--debug` / `-v`) is set. It runs at most one
 proxy per distinct `(endpoint, advertised tool set)`: PLANINSPECTION and DEEPINSPECT
 both advertise the **source** tools; all other stages (LOGPARSE, HYPOTHESIZE,
-FEEDBACK, COMBINE) advertise **none**, and tool-less stages sharing the same endpoint
+FEEDBACK, SUMMARIZE) advertise **none**, and tool-less stages sharing the same endpoint
 reuse one proxy instance. DEEPINSPECT always gets its own proxy even when it shares
 an endpoint with PLANINSPECTION, because it has operator-interrupt support wired in.
 
@@ -315,7 +317,7 @@ internal/pipeline           stage state machine and all stage implementations
   hypothesize.go            HYPOTHESIZE stage (with feedback retry loop)
   planinspect.go            PLANINSPECTION-all stage (one breadth-first survey per hypothesis)
   deepinspect.go            DEEPINSPECT-all stage (one deep investigation per hypothesis)
-  combine.go                COMBINE stage (with feedback retry loop)
+  summarize.go                SUMMARIZE stage (with feedback retry loop)
   feedback.go               feedbackChecker + per-stage quality criteria
   pipeline.go               Pipeline, Context, FinalResult, Hypothesis, PlanInspectOutcome, DeepInspectOutcome
 internal/planner            the PLANINSPECTION agent: build, prompt, one-shot tool loop
@@ -324,7 +326,7 @@ internal/distill            post-test MEMORIZE step: extract codebase facts → 
 internal/mapping            test -> source file mapper
 internal/workspace          path jail for the file tools
 internal/tools              the workspace tools (native-schema internal tools)
-internal/report             Markdown report writer (COMBINE body + per-hypothesis appendix)
+internal/report             Markdown report writer (SUMMARIZE body + per-hypothesis appendix)
 internal/llmproxy           in-process proxy fronting an LLM endpoint
 internal/toolproto          normalize open-model tool-call syntaxes
 ```

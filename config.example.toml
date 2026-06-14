@@ -16,7 +16,7 @@
 #
 # The pipeline is:
 #   DOWNLOAD → LOGPARSE → FEEDBACK → HYPOTHESIZE → FEEDBACK →
-#   [DEEPINSPECT → FEEDBACK] × N → COMBINE → FEEDBACK
+#   [DEEPINSPECT → FEEDBACK] × N → SUMMARIZE → FEEDBACK
 #
 # You define LLMs once under [llms.<name>] and point each stage at one by name
 # under [stages]. Only logparse and deepinspect are required; everything else
@@ -37,7 +37,7 @@ api_token = "your-jenkins-api-token"
 # ---------------------------------------------------------------------------
 
 [llms.fast]
-# A cheaper/faster model: good enough to read the log, hypothesize, and combine.
+# A cheaper/faster model: good enough to read the log, hypothesize, and summarize.
 provider       = "openai"
 base_url       = "http://localhost:1234/v1"
 model          = "your-fast-model"
@@ -65,11 +65,11 @@ max_tokens     = 4096
 #
 # Optional (all default to the logparse LLM when unset):
 #   hypothesize          — reads the brief + architecture doc, produces hypotheses
-#   combine              — reads all hypotheses + DEEPINSPECT results, picks the best
+#   summarize            — summarizes each hypothesis and identifies the most likely root cause
 #   logparse_feedback    — checks the LOGPARSE brief quality
 #   hypothesize_feedback — checks the HYPOTHESIZE hypothesis list
 #   deepinspect_feedback — checks each DEEPINSPECT result
-#   combine_feedback     — checks the COMBINE analysis
+#   summarize_feedback   — checks the SUMMARIZE output
 #
 # Stages that share the same endpoint and tool set reuse one proxy instance, so
 # pointing multiple optional stages at "fast" costs nothing extra.
@@ -79,11 +79,11 @@ max_tokens     = 4096
 logparse    = "fast"
 deepinspect = "deep"
 # hypothesize          = "fast"
-# combine              = "fast"
+# summarize            = "fast"
 # logparse_feedback    = "fast"
 # hypothesize_feedback = "fast"
 # deepinspect_feedback = "fast"
-# combine_feedback     = "fast"
+# summarize_feedback   = "fast"
 
 [proxy]
 # Tool-call protocol normalization. Different open models (GPT-OSS, Gemma,
@@ -130,7 +130,7 @@ dir = "test-diagnosis"   # one Markdown report per failed test is written here
 [stage_config]
 # Per-stage tuning. Each *_max_feedbacks value controls how many times the
 # FEEDBACK gate may reject that stage's output before the test is abandoned
-# (for logparse/hypothesize/combine) or the hypothesis is soft-failed
+# (for logparse/hypothesize/summarize) or the hypothesis is soft-failed
 # (for deepinspect). Set to 0 to disable feedback for that stage entirely.
 #
 # Worst-case LLM calls per test (DEEPINSPECT only, excluding feedback):
@@ -149,5 +149,5 @@ deepinspect_max_feedbacks      = 1
 #   env: TESTDIAG_DEEPINSPECT_MAX_TOOL_ITERATIONS
 deepinspect_max_tool_iterations = 50
 
-#   env: TESTDIAG_COMBINE_MAX_FEEDBACKS
-combine_max_feedbacks          = 2
+#   env: TESTDIAG_SUMMARIZE_MAX_FEEDBACKS
+summarize_max_feedbacks        = 2
