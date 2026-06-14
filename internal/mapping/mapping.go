@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -42,6 +43,9 @@ func MapTestToSource(mapperPath, workspaceRoot string, test jenkins.FailedTest) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
+	if !filepath.IsAbs(mapperPath) {
+		mapperPath = filepath.Join(workspaceRoot, mapperPath)
+	}
 	cmd := exec.CommandContext(ctx, mapperPath, test.FullName())
 	cmd.Dir = workspaceRoot
 	out, err := cmd.Output() // stderr is left uncaptured so the mapper can log there
